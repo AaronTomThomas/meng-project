@@ -1,4 +1,4 @@
-### Training Harness
+# Training Harness
 
 This is a reusable PyTorch DDP training entrypoint for experiments that follow the standard supervised pattern:
 - build dataset and dataloader
@@ -23,7 +23,7 @@ Codebase is split into:
 
 Each experiment should implement the common experiment API defined in `src/experiments/base.py`.
 
-# Checkpoint Contents
+## Checkpoint Contents
 
 Checkpoints store:
 ```python
@@ -42,7 +42,14 @@ Checkpoints store:
 
 Run training from the repo root with `torchrun` through `uv`:
 
-# Smoke-test
+## Adding a new Experiment
+
+- Create a new experiment file in src/experiments/
+- Implement the interface from src/experiments/base.py
+- Register it in src/experiments/__init__.py
+- Run it with --experiment <name>
+
+### Smoke-test
 ```bash
 uv run torchrun --nproc_per_node=1 src/train/train.py \
   --experiment tiny_shakespeare \
@@ -63,9 +70,3 @@ uv run torchrun --nproc_per_node=1 src/train/train.py \
   --save_path checkpoints/test_ckpt.pt
 ```
 
-# Adding a new Experiment
-
-- Create a new experiment file in src/experiments/
-- Implement the interface from src/experiments/base.py
-- Register it in src/experiments/__init__.py
-- Run it with --experiment <name>
