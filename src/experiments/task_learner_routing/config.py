@@ -1,0 +1,27 @@
+
+from dataclasses import dataclass
+import torch
+
+
+@dataclass
+class EvalConfig:
+    L: int = 128
+    d: int = 32
+    dv: int = 16
+    batch_size: int = 128
+    sigma: float = 0.05
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype: torch.dtype = torch.float32
+
+    # learner hyperparams
+    beta_soft: float = 6.0
+    k_sharp: int = 4
+    k_linear_local: int = 16
+    ridge_lambda: float = 1e-1
+    min_context: int = 8
+    retention_decay: float = 0.9
+    window_size: int = 16
+    k_knn_mean: int = 4
+
+def _randn(*shape, cfg: EvalConfig):
+    return torch.randn(*shape, device=cfg.device, dtype=cfg.dtype)
