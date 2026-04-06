@@ -1,7 +1,7 @@
 import math
 from typing import Tuple
 
-from experiments.task_learner_routing.config import EvalConfig, _randn
+from experiments.synthetic_alignment.config import EvalConfig, _randn
 import torch
 
 
@@ -86,7 +86,7 @@ def generate_support_query_shifted_local_map(
         # only evaluate on the shifted query position
         query_mask[:, end - 1] = True
 
-    return K, V
+    return K, V, query_mask
 
 
 @torch.no_grad()

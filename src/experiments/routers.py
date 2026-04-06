@@ -94,7 +94,7 @@ def train_loss_mlp_router(
     losses_val: torch.Tensor,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
-    epochs: int = 4000,
+    epochs: int = 8000,
     hidden_dim: int = 64,
 ) -> LossMLPRouter:
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -121,6 +121,8 @@ def train_loss_mlp_router(
         loss = F.mse_loss(pred_losses, losses_train)
         if (i) % 500 == 0:
             print(f"Epoch {i}, train MSE loss: {loss.item():.4f}")
+            
+            print("Best val routed loss so far: {:.4f}".format(best_val_routed_loss))
 
         opt.zero_grad()
         loss.backward()
@@ -138,6 +140,8 @@ def train_loss_mlp_router(
         if val_routed_loss < best_val_routed_loss:
             best_val_routed_loss = val_routed_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            
+            
 
     model.load_state_dict(best_state)
     return model
@@ -212,3 +216,75 @@ def evaluate_loss_router(
         "pred": pred.cpu(),
         "pred_losses": pred_losses.cpu(),
     }
+
+@torch.no_grad()
+def evaluate_router_per_task(
+    pred: torch.Tensor,              # (N,)
+    losses: torch.Tensor,            # (N,M)
+    task_ids: torch.Tensor,          # (N,)
+    task_to_idx: dict,
+):
+    """
+    Evaluate routed loss / oracle gap closed per task.
+    """
+    if pred.device != losses.device:
+        pred = pred.to(losses.device)
+    if task_ids.device != losses.device:
+        task_ids = task_ids.to(losses.device)
+
+    idx_to_task = {v: k for k, v in task_to_idx.items()}
+    out = {}
+
+    for t in sorted(idx_to_task.keys()):
+        mask = (task_ids == t)
+        if mask.sum().item() == 0:
+            continue
+
+        losses_t = losses[mask]
+        pred_t = pred[mask]
+
+        routed_loss = losses_t[
+            torch.arange(losses_t.shape[0], device=losses.device),
+            pred_t
+        ].mean().item()
+
+        oracle_loss = losses_t.min(dim=-1).values.mean().item()
+        best_fixed_loss = losses_t.mean(dim=0).min().item()
+
+        gap_closed = (best_fixed_loss - routed_loss) / max(best_fixed_loss - oracle_loss, 1e-8)
+
+        out[idx_to_task[t]] = {
+            "best_fixed_loss": best_fixed_loss,
+            "routed_loss": routed_loss,
+            "oracle_loss": oracle_loss,
+            "oracle_gap_closed_frac": gap_closed,
+        }
+
+    return out
+
+@torch.no_grad()
+def evaluate_per_task_best_fixed_baseline(
+    losses_train: torch.Tensor,
+    task_ids_train: torch.Tensor,
+    losses_test: torch.Tensor,
+    task_ids_test: torch.Tensor,
+    task_to_idx: dict,
+):
+    """
+    Choose, for each task, the learner with best average train loss.
+    Evaluate on test.
+    """
+    idx_to_task = {v: k for k, v in task_to_idx.items()}
+    chosen = {}
+
+    for t in sorted(idx_to_task.keys()):
+        mask = (task_ids_train == t)
+        best_idx = losses_train[mask].mean(dim=0).argmin().item()
+        chosen[t] = best_idx
+
+    pred = torch.empty(losses_test.shape[0], dtype=torch.long)
+    for t in sorted(idx_to_task.keys()):
+        mask = (task_ids_test == t)
+        pred[mask.cpu()] = chosen[t]
+
+    return pred

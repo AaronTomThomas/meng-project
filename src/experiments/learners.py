@@ -1,4 +1,4 @@
-from experiments.task_learner_routing.config import EvalConfig
+from experiments.synthetic_alignment.config import EvalConfig
 import torch
 import torch.nn.functional as F
 

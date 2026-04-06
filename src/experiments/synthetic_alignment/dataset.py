@@ -3,9 +3,9 @@
 
 from typing import Dict, List
 
-from experiments.task_learner_routing.config import EvalConfig
-from experiments.task_learner_routing.learners import predict_with_learner, sharp_topk_predict, soft_kernel_predict, window_soft_predict
-from experiments.task_learner_routing.tasks import TASK_FNS
+from experiments.synthetic_alignment.config import EvalConfig
+from experiments.learners import predict_with_learner, sharp_topk_predict, soft_kernel_predict, window_soft_predict
+from experiments.synthetic_alignment.tasks import TASK_FNS
 import torch
 import torch.nn.functional as F
 
@@ -450,3 +450,64 @@ def train_test_split_dataset(ds: Dict[str, torch.Tensor], train_frac: float = 0.
         out[f"{k}_test"] = ds[k][test_idx]
     out["task_to_idx"] = ds["task_to_idx"]
     return out
+
+def compute_taskwise_regret_targets(
+    losses: torch.Tensor,      # (N,M)
+    task_ids: torch.Tensor,    # (N,)
+    eps: float = 1e-8,
+):
+    """
+    Convert raw per-learner losses into task-normalized regret targets.
+
+    Returns:
+      regrets: raw regret = loss - oracle_loss           (N,M)
+      regrets_norm: taskwise normalized regret targets   (N,M)
+      stats: dict with normalization metadata
+    """
+    N, M = losses.shape
+    oracle = losses.min(dim=-1, keepdim=True).values          # (N,1)
+    regrets = losses - oracle                                 # (N,M)
+
+    task_ids_unique = torch.unique(task_ids)
+    regrets_norm = torch.empty_like(regrets)
+
+    task_scale = {}
+    for t in task_ids_unique.tolist():
+        mask = (task_ids == t)
+        # use mean regret scale for this task
+        scale = regrets[mask].mean().item()
+        scale = max(scale, eps)
+        regrets_norm[mask] = regrets[mask] / scale
+        task_scale[int(t)] = scale
+
+    stats = {"task_scale": task_scale}
+    return regrets, regrets_norm, stats
+
+def normalize_regrets_train_test(
+    regrets_train: torch.Tensor,
+    task_ids_train: torch.Tensor,
+    regrets_test: torch.Tensor,
+    task_ids_test: torch.Tensor,
+    eps: float = 1e-8,
+):
+    """
+    Taskwise normalization fitted on train split only.
+    """
+    regrets_train_norm = torch.empty_like(regrets_train)
+    regrets_test_norm = torch.empty_like(regrets_test)
+
+    task_ids_unique = torch.unique(task_ids_train)
+    task_scale = {}
+
+    for t in task_ids_unique.tolist():
+        train_mask = (task_ids_train == t)
+        test_mask = (task_ids_test == t)
+
+        scale = regrets_train[train_mask].mean().item()
+        scale = max(scale, eps)
+
+        regrets_train_norm[train_mask] = regrets_train[train_mask] / scale
+        regrets_test_norm[test_mask] = regrets_test[test_mask] / scale
+        task_scale[int(t)] = scale
+
+    return regrets_train_norm, regrets_test_norm, {"task_scale": task_scale}

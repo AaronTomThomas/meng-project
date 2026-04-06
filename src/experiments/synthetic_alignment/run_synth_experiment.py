@@ -2,11 +2,11 @@
 
 from typing import List, Dict
 
-from experiments.task_learner_routing.config import EvalConfig
-from experiments.task_learner_routing.dataset import collect_router_dataset, standardize_train_test, train_test_split_dataset
-from experiments.task_learner_routing.learners import LEARNERS, ROUTER_LEARNERS, predict_with_learner
-from experiments.task_learner_routing.routers import evaluate_logistic_router, evaluate_loss_router, train_logistic_router, train_loss_mlp_router
-from experiments.task_learner_routing.tasks import TASK_FNS
+from experiments.synthetic_alignment.config import EvalConfig
+from experiments.synthetic_alignment.dataset import collect_router_dataset, normalize_regrets_train_test, standardize_train_test, train_test_split_dataset
+from experiments.learners import LEARNERS, ROUTER_LEARNERS, predict_with_learner
+from experiments.routers import evaluate_logistic_router, evaluate_loss_router, evaluate_per_task_best_fixed_baseline, evaluate_router_per_task, train_logistic_router, train_loss_mlp_router
+from experiments.synthetic_alignment.tasks import TASK_FNS
 import torch
 
 
@@ -46,7 +46,7 @@ def run_router_experiment(
             y_val=split["y_test"],
             lr=1e-2,
             weight_decay=1e-4,
-            epochs=4000,
+            epochs=8000,
         )
 
         train_metrics = evaluate_logistic_router(
@@ -61,17 +61,32 @@ def run_router_experiment(
             split["y_test"],
             split["losses_test"],
         )
-
     elif router_mode == "loss_mlp":
-        print("\n=== Training loss-predicting MLP router ===")
+        print("\n=== Preparing task-normalized regret targets ===")
+
+        # raw regret targets
+        oracle_train = split["losses_train"].min(dim=-1, keepdim=True).values
+        oracle_test = split["losses_test"].min(dim=-1, keepdim=True).values
+
+        regrets_train = split["losses_train"] - oracle_train
+        regrets_test = split["losses_test"] - oracle_test
+
+        regrets_train_norm, regrets_test_norm, regret_stats = normalize_regrets_train_test(
+            regrets_train=regrets_train,
+            task_ids_train=split["task_ids_train"],
+            regrets_test=regrets_test,
+            task_ids_test=split["task_ids_test"],
+        )
+
+        print("\n=== Training loss-predicting MLP router on normalized regrets ===")
         model = train_loss_mlp_router(
             X_train=X_train_std,
-            losses_train=split["losses_train"],
+            losses_train=regrets_train_norm,
             X_val=X_test_std,
-            losses_val=split["losses_test"],
+            losses_val=regrets_test_norm,
             lr=1e-3,
             weight_decay=1e-4,
-            epochs=75000,
+            epochs=8000,
             hidden_dim=64,
         )
 
@@ -79,19 +94,37 @@ def run_router_experiment(
             model,
             X_train_std,
             split["y_train"],
-            split["losses_train"],
+            split["losses_train"],   # evaluate on raw losses
         )
         test_metrics = evaluate_loss_router(
             model,
             X_test_std,
             split["y_test"],
-            split["losses_test"],
+            split["losses_test"],    # evaluate on raw losses
         )
-
     else:
         raise ValueError(f"Unknown router_mode: {router_mode}")
 
-    print("\n=== Router results ===")
+
+
+    pred_test = test_metrics["pred"]
+
+    per_task_test = evaluate_router_per_task(
+        pred=pred_test,
+        losses=split["losses_test"],
+        task_ids=split["task_ids_test"],
+        task_to_idx=split["task_to_idx"],
+    )
+    print("\n=== Per-task router results (test) ===")
+    for task_name, vals in per_task_test.items():
+        print(
+            f"{task_name:<24} "
+            f"best_fixed={vals['best_fixed_loss']:.6f}  "
+            f"routed={vals['routed_loss']:.6f}  "
+            f"oracle={vals['oracle_loss']:.6f}  "
+            f"gap_closed={100*vals['oracle_gap_closed_frac']:.2f}%"
+        )
+    print("\n=== Aggregate Router results ===")
     print(f"router mode:           {router_mode}")
     print(f"learners:              {learners}")
     print(f"train acc:             {train_metrics['acc']:.4f}")
@@ -101,17 +134,44 @@ def run_router_experiment(
     print(f"test oracle loss:      {test_metrics['oracle_loss']:.6f}")
     print(f"oracle gap closed:     {100 * test_metrics['oracle_gap_closed_frac']:.2f}%")
 
+
+    baseline_pred = evaluate_per_task_best_fixed_baseline(
+        losses_train=split["losses_train"],
+        task_ids_train=split["task_ids_train"],
+        losses_test=split["losses_test"],
+        task_ids_test=split["task_ids_test"],
+        task_to_idx=split["task_to_idx"],
+    )
+
+    baseline_per_task = evaluate_router_per_task(
+        pred=baseline_pred,
+        losses=split["losses_test"],
+        task_ids=split["task_ids_test"],
+        task_to_idx=split["task_to_idx"],
+    )
+
+    print("\n=== Per-task best-fixed baseline (test) ===")
+    for task_name, vals in baseline_per_task.items():
+        print(
+            f"{task_name:<24} "
+            f"best_fixed={vals['best_fixed_loss']:.6f}  "
+            f"routed={vals['routed_loss']:.6f}  "
+            f"oracle={vals['oracle_loss']:.6f}  "
+            f"gap_closed={100*vals['oracle_gap_closed_frac']:.2f}%"
+        )
+        
     return {
         "model": model,
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
+        "per_task_test": per_task_test,
+        "baseline_per_task": baseline_per_task,
         "split": split,
         "mu": mu,
         "std": std,
         "learners": learners,
         "router_mode": router_mode,
     }
-
 
 @torch.no_grad()
 def evaluate_task_family_with_winners(
@@ -370,7 +430,7 @@ if __name__ == "__main__":
     router_out_logistic = run_router_experiment(
         cfg,
         router_mode="logistic",
-        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local", "shifted_local_map"],
+        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local"],
         learners=ROUTER_LEARNERS,
         n_batches_per_task=8,
         seed=0,
@@ -379,7 +439,7 @@ if __name__ == "__main__":
     router_out_loss_mlp = run_router_experiment(
         cfg,
         router_mode="loss_mlp",
-        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local", "shifted_local_map"],
+        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local"],
         learners=ROUTER_LEARNERS,
         n_batches_per_task=8,
         seed=0,
