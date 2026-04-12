@@ -1,0 +1,52 @@
+=== Single-seed run ===
+
+Evaluation results
+task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global     uniform_mix          oracle          winner
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+piecewise_linear               32.150279       39.455362       32.072606       38.232799       38.150405       32.556869       63.494257       33.139637       27.843223     window_soft
+prototype_lookup                0.399074        0.399542        1.192610        0.307053        0.622702        0.918051        0.984371        0.373422        0.215148 weighted_linear
+smooth_nonlinear_local          0.493674        0.607884        0.514753        0.228991        0.607405        0.495566        0.400447        0.407187        0.162138 weighted_linear
+shifted_local_map               1.546507        1.274928        1.386378        0.727835        1.290415        1.818573        1.503637        1.174579        0.618354 weighted_linear
+
+Oracle gap analysis
+-------------------
+piecewise_linear         best_fixed=32.072606  oracle=27.843223  oracle_gain=4.229383 (13.19%)  uniform_mix=33.139637  uniform_gap=-1.067031 (-3.33%)
+prototype_lookup         best_fixed=0.307053  oracle=0.215148  oracle_gain=0.091905 (29.93%)  uniform_mix=0.373422  uniform_gap=-0.066369 (-21.61%)
+smooth_nonlinear_local   best_fixed=0.228991  oracle=0.162138  oracle_gain=0.066853 (29.19%)  uniform_mix=0.407187  uniform_gap=-0.178195 (-77.82%)
+shifted_local_map        best_fixed=0.727835  oracle=0.618354  oracle_gain=0.109481 (15.04%)  uniform_mix=1.174579  uniform_gap=-0.446744 (-61.38%)
+
+Oracle winner fractions
+-----------------------
+task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global
+----------------------------------------------------------------------------------------------------------------------------------------
+piecewise_linear                   0.131           0.042           0.322           0.100           0.060           0.257           0.089
+prototype_lookup                   0.352           0.078           0.032           0.249           0.128           0.145           0.015
+smooth_nonlinear_local             0.012           0.025           0.031           0.743           0.033           0.045           0.111
+shifted_local_map                  0.008           0.029           0.075           0.714           0.027           0.010           0.137
+
+
+=== Multi-seed average (seeds: 0, 1, 2, 3, 4) ===
+
+Evaluation results
+task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global     uniform_mix          oracle          winner
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+piecewise_linear               32.180466       39.378743       32.082416       38.312859       38.102328       32.633047       63.361165       33.133712       27.878776     window_soft
+prototype_lookup                0.397345        0.397769        1.188043        0.304392        0.620513        0.915919        0.978509        0.372443        0.214009 weighted_linear
+smooth_nonlinear_local          0.517432        0.644622        0.538781        0.232344        0.644002        0.519622        0.416816        0.424968        0.165427 weighted_linear
+shifted_local_map               1.554282        1.307650        1.400654        0.827298        1.317328        1.798045        1.528258        1.201052        0.686740 weighted_linear
+
+Oracle gap analysis
+-------------------
+piecewise_linear         best_fixed=32.082416  oracle=27.878776  oracle_gain=4.203640 (13.10%)  uniform_mix=33.133712  uniform_gap=-1.051296 (-3.28%)
+prototype_lookup         best_fixed=0.304392  oracle=0.214009  oracle_gain=0.090383 (29.69%)  uniform_mix=0.372443  uniform_gap=-0.068050 (-22.36%)
+smooth_nonlinear_local   best_fixed=0.232344  oracle=0.165427  oracle_gain=0.066917 (28.80%)  uniform_mix=0.424968  uniform_gap=-0.192624 (-82.90%)
+shifted_local_map        best_fixed=0.827298  oracle=0.686740  oracle_gain=0.140557 (16.99%)  uniform_mix=1.201052  uniform_gap=-0.373754 (-45.18%)
+
+Oracle winner fractions
+-----------------------
+task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global
+----------------------------------------------------------------------------------------------------------------------------------------
+piecewise_linear                   0.127           0.044           0.325           0.094           0.060           0.258           0.092
+prototype_lookup                   0.358           0.076           0.031           0.246           0.131           0.146           0.012
+smooth_nonlinear_local             0.010           0.025           0.032           0.744           0.033           0.044           0.111
+shifted_local_map                  0.008           0.032           0.079           0.688           0.038           0.013           0.142

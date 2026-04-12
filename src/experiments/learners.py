@@ -1,3 +1,5 @@
+import math
+
 from experiments.synthetic_alignment.config import EvalConfig
 import torch
 import torch.nn.functional as F
@@ -82,14 +84,20 @@ def soft_kernel_predict(
     Vctx: torch.Tensor,   # (B,n,dv)
     beta: float,
 ) -> torch.Tensor:
+    # d = q.shape[-1]
+    # qn = F.normalize(q, dim=-1)
+    # Kn = F.normalize(Kctx, dim=-1)
+    # scores = torch.einsum("bd,bnd->bn", qn, Kn)
+    # # scores = torch.einsum("bd,bnd->bn", q, Kctx) / math.sqrt(d)
+    # w = F.softmax(beta * scores, dim=-1)
+    # yhat = torch.einsum("bn,bnv->bv", w, Vctx)
+    # return yhat
     d = q.shape[-1]
-    qn = F.normalize(q, dim=-1)
-    Kn = F.normalize(Kctx, dim=-1)
-    scores = torch.einsum("bd,bnd->bn", qn, Kn)
-    # scores = torch.einsum("bd,bnd->bn", q, Kctx) / math.sqrt(d)
-    w = F.softmax(beta * scores, dim=-1)
-    yhat = torch.einsum("bn,bnv->bv", w, Vctx)
-    return yhat
+    q_col = q.unsqueeze(-1)
+    attn_logits = torch.matmul(Kctx, q_col).squeeze(-1) / math.sqrt(d)
+    attn_weights = F.softmax(attn_logits, dim=-1)
+    out = torch.matmul(attn_weights.unsqueeze(1), Vctx).squeeze(1)
+    return out
 
 
 @torch.no_grad()

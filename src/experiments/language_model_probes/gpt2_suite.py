@@ -16,10 +16,19 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from experiments.learners import predict_with_learner
+from experiments.language_model_probes.probe_utils import (
+    LearnerRegistry,
+    causal_soft_attention_from_qkv,
+    first_tensor,
+    merge_heads,
+    set_seed,
+    short_hash,
+    split_heads,
+)
 
 
 LEARNERS = ["soft", "sharp", "window_soft", "weighted_linear"]
+LEARNER_REGISTRY = LearnerRegistry(LEARNERS)
 
 
 # ============================================================
@@ -102,22 +111,6 @@ class BenchConfig:
 # Utilities
 # ============================================================
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def first_tensor(x):
-    if isinstance(x, tuple):
-        return x[0]
-    return x
-
-
-def short_hash(s: str) -> str:
-    return hashlib.md5(s.encode()).hexdigest()[:10]
-
 
 def cache_stem(cfg: BenchConfig) -> str:
     key = json.dumps(asdict(cfg), sort_keys=True)
@@ -171,36 +164,6 @@ def build_eval_cfg(cfg: BenchConfig, head_dim: int) -> EvalConfig:
         min_context=cfg.min_context,
         window_size=cfg.window_size,
     )
-
-
-def split_heads(x: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
-    # x: (B, L, D)
-    B, L, D = x.shape
-    assert D == num_heads * head_dim
-    return x.view(B, L, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
-
-
-def merge_heads(x: torch.Tensor) -> torch.Tensor:
-    # x: (B, H, L, Dh)
-    B, H, L, Dh = x.shape
-    return x.permute(0, 2, 1, 3).contiguous().view(B, L, H * Dh)
-
-
-def causal_soft_attention_from_qkv(
-    q: torch.Tensor,  # (B,H,L,Dh)
-    k: torch.Tensor,  # (B,H,L,Dh)
-    v: torch.Tensor,  # (B,H,L,Dh)
-) -> torch.Tensor:
-    _, _, L, Dh = q.shape
-    scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(Dh)
-    causal = torch.triu(
-        torch.ones(L, L, device=q.device, dtype=torch.bool),
-        diagonal=1,
-    )
-    scores = scores.masked_fill(causal[None, None, :, :], float("-inf"))
-    attn = torch.softmax(scores, dim=-1)
-    z = torch.matmul(attn, v)
-    return z
 
 
 # ============================================================
@@ -480,7 +443,7 @@ def predict_head_output_for_all_learners(
 
     out = {}
     for learner in LEARNERS:
-        pred = predict_with_learner(learner, q_t, Kctx, Vctx, eval_cfg)  # (1,Dh)
+        pred = LEARNER_REGISTRY.predict(learner, q_t, Kctx, Vctx, eval_cfg)  # (1,Dh)
         out[learner] = pred[0]
     return out
 

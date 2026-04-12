@@ -15,13 +15,19 @@ class EvalConfig:
 
     # learner hyperparams
     beta_soft: float = 6.0
-    k_sharp: int = 4
+    k_sharp: int = 2
     k_linear_local: int = 16
     ridge_lambda: float = 1e-1
     min_context: int = 8
     retention_decay: float = 0.9
     window_size: int = 16
     k_knn_mean: int = 4
+
+
+@dataclass
+class RouterExperimentConfig(EvalConfig):
+    """Configuration for router experiments; currently inherits EvalConfig."""
+    pass
 
 def _randn(*shape, cfg: EvalConfig):
     return torch.randn(*shape, device=cfg.device, dtype=cfg.dtype)
