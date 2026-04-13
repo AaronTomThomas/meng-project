@@ -1,65 +1,31 @@
-#!/usr/bin/env python3
-from __future__ import annotations
-
 import argparse
+from dataclasses import dataclass
 import hashlib
 import itertools
-import math
-import random
-from dataclasses import dataclass
 from pathlib import Path
+import random
 from typing import Dict, List, Sequence, Tuple
 
+from experiments.attention_learners import LearnerHyperParams
+from experiments.language_model_probes.probe_utils import LearnerRegistry, causal_soft_attention_from_qkv, merge_heads, split_heads
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from experiments.synthetic_alignment.config import EvalConfig
-from experiments.language_model_probes.probe_utils import (
-    LearnerRegistry,
-    causal_soft_attention_from_qkv,
-    merge_heads,
-    set_seed,
-    split_heads,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
+
+import math
 
 BASE_LEARNERS = ["soft", "sharp", "window_soft", "weighted_linear"]
 LEARNER_REGISTRY = LearnerRegistry(BASE_LEARNERS)
 
 
-# ============================================================
-# basic tensor helpers
-# ============================================================
-
-def first_tensor(x):
-    if isinstance(x, tuple):
-        return x[0]
-    return x
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def short_hash(s: str) -> str:
-    return hashlib.md5(s.encode()).hexdigest()[:10]
-
-
-# ============================================================
-# config
-# ============================================================
-
 @dataclass
-class BenchConfig:
+class SequenceOracleConfig(LearnerHyperParams):
     model_name: str = "openai-community/gpt2"
     dataset_name: str = "wikitext"
     dataset_config: str = "wikitext-2-raw-v1"
     split: str = "validation"
-    text_field: str = "text"
 
     max_texts: int = 200
     block_size: int = 96
@@ -71,19 +37,12 @@ class BenchConfig:
     min_context: int = 16
     position_stride: int = 1
 
-    beta_soft: float = 6.0
-    k_sharp: int = 4
-    window_size: int = 16
-    k_linear_local: int = 16
-    ridge_lambda: float = 1e-1
-
-    replace_mode: str = "multi_head_single_pos_per_head"
-    head_group_size: int = 2
+    replace_mode: str = "multi_head_single_pos_per_head" #"multi_head_single_pos_shared/multi_head_single_pos_per_head"
+    head_group_size: int = 12
     head_group_strategy: str = "contiguous"
     manual_head_groups: str = ""
     max_head_groups: int = 0
 
-    oracle_mode: str = "greedy_suffix"  # greedy_suffix | local_then_joint
     save_results: bool = False
     output_dir: str = "outputs/head_counterfactual_results"
     cache_dir: str = "outputs/head_counterfactual_cache"
@@ -92,24 +51,7 @@ class BenchConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def make_eval_cfg(cfg: BenchConfig, head_dim: int) -> EvalConfig:
-    return EvalConfig(
-        L=cfg.block_size,
-        d=head_dim,
-        dv=head_dim,
-        batch_size=1,
-        sigma=0.0,
-        device=cfg.device,
-        beta_soft=cfg.beta_soft,
-        k_sharp=cfg.k_sharp,
-        k_linear_local=cfg.k_linear_local,
-        ridge_lambda=cfg.ridge_lambda,
-        min_context=cfg.min_context,
-        window_size=cfg.window_size,
-    )
-
-
-def cache_stem(cfg: BenchConfig) -> str:
+def cache_stem(cfg: SequenceOracleConfig) -> str:
     key = (
         f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.split}|"
         f"maxtexts={cfg.max_texts}|block={cfg.block_size}|maxchunks={cfg.max_chunks}|"
@@ -119,29 +61,163 @@ def cache_stem(cfg: BenchConfig) -> str:
         f"window={cfg.window_size}|klin={cfg.k_linear_local}|ridge={cfg.ridge_lambda}|"
         f"seed={cfg.seed}"
     )
-    return short_hash(key)
+    return hashlib.md5(key.encode()).hexdigest()[:10]
+
+@torch.no_grad()
+def get_input_embeddings_gpt2(model, input_ids: torch.Tensor) -> torch.Tensor:
+    device = input_ids.device
+    _, seqlen = input_ids.shape
+    transformer = model.transformer
+    pos_ids = torch.arange(seqlen, device=device).unsqueeze(0)
+    tok_emb = transformer.wte(input_ids)
+    pos_emb = transformer.wpe(pos_ids)
+    hidden_states = tok_emb + pos_emb
+    hidden_states = transformer.drop(hidden_states)
+    return hidden_states
+
+@torch.no_grad()
+def get_block_input_gpt2(model, input_ids: torch.Tensor, layer_idx: int) -> torch.Tensor:
+    x = get_input_embeddings_gpt2(model, input_ids)
+    blocks = model.transformer.h
+    if layer_idx < 0 or layer_idx >= len(blocks):
+        raise ValueError(f"layer_idx={layer_idx} invalid for {len(blocks)} blocks")
+    for l in range(layer_idx):
+        x = blocks[l](x, use_cache=False)
+        x = x[0] if isinstance(x, tuple) else x
+    return x
 
 
-# ============================================================
-# head / unit utilities
-# ============================================================
 
-def parse_head_indices(head_indices: str, n_heads: int) -> List[int]:
-    if head_indices == "all":
-        return list(range(n_heads))
-    out = [int(x.strip()) for x in head_indices.split(",") if x.strip()]
-    for h in out:
-        if h < 0 or h >= n_heads:
-            raise ValueError(f"Head index {h} out of range [0, {n_heads-1}]")
+@torch.no_grad()
+def extract_head_qkv_and_teacher_outputs_gpt2(model, x_in: torch.Tensor, layer_idx: int):
+    block = model.transformer.h[layer_idx]
+    attn_module = block.attn
+    h_ln1 = block.ln_1(x_in)
+
+    qkv = attn_module.c_attn(h_ln1)
+    split_size = attn_module.split_size
+    q_raw, k_raw, v_raw = qkv.split(split_size, dim=2)
+
+    num_heads = attn_module.num_heads
+    head_dim = attn_module.head_dim
+
+    q = split_heads(q_raw, num_heads, head_dim)
+    k = split_heads(k_raw, num_heads, head_dim)
+    v = split_heads(v_raw, num_heads, head_dim)
+
+    z_teacher = causal_soft_attention_from_qkv(q, k, v)
+    zcat_teacher = merge_heads(z_teacher)
+    return h_ln1, q, k, v, z_teacher, zcat_teacher, block, attn_module
+    
+def run_to_block_and_cache_tensors(model, chunks: torch.Tensor, cfg: SequenceOracleConfig):
+    cache_dir = Path(cfg.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = cache_stem(cfg)
+    cache_path = cache_dir / f"{stem}__layer{cfg.layer_idx}__block_tensors.pt"
+
+    if cache_path.exists():
+        print(f"[cache] loading block tensors from {cache_path}")
+        return torch.load(cache_path)
+
+    print("[cache-build] extracting block tensors...")
+    n_chunks = chunks.shape[0]
+
+    n_batches = math.ceil(n_chunks / cfg.batch_size)
+    x_in_all = []
+    q_all = []
+    k_all = []
+    v_all = []
+    z_teacher_all = []
+    zcat_teacher_all = []
+
+    for batch_idx, start in enumerate(range(0, n_chunks, cfg.batch_size)):
+        batch_ids = list(range(start, min(start + cfg.batch_size, n_chunks)))
+        batch_input_ids = chunks[batch_ids].to(cfg.device)
+
+        x_in = get_block_input_gpt2(model, batch_input_ids, cfg.layer_idx)
+        _, q, k, v, z_teacher, zcat_teacher, _, _ = extract_head_qkv_and_teacher_outputs_gpt2(
+            model, x_in, cfg.layer_idx
+        )
+        x_in_all.append(x_in.cpu())
+        q_all.append(q.cpu())
+        k_all.append(k.cpu())
+        v_all.append(v.cpu())
+        z_teacher_all.append(z_teacher.cpu())
+        zcat_teacher_all.append(zcat_teacher.cpu())
+        if batch_idx % 5 == 0 or batch_idx == n_batches - 1:
+            print(f"[cache-build] batch {batch_idx+1}/{n_batches} chunks {batch_ids[0]}..{batch_ids[-1]}")
+    out = {
+        "x_in": torch.cat(x_in_all, dim=0),
+        "q": torch.cat(q_all, dim=0),
+        "k": torch.cat(k_all, dim=0),
+        "v": torch.cat(v_all, dim=0),
+        "z_teacher": torch.cat(z_teacher_all, dim=0),
+        "zcat_teacher": torch.cat(zcat_teacher_all, dim=0),
+    }
+    torch.save(out, cache_path)
+    print(f"[cache] saved block tensors to {cache_path}")
     return out
 
+@torch.no_grad()
+def continue_from_modified_block_gpt2(model, block, x_in: torch.Tensor, zcat_mod: torch.Tensor, layer_idx: int):
+    attn_out = block.attn.c_proj(zcat_mod)
+    attn_out = block.attn.resid_dropout(attn_out)
+    x = x_in + attn_out
+    residual = x
+    x_ln2 = block.ln_2(x)
+    mlp_out = block.mlp(x_ln2)
+    x = residual + mlp_out
+
+    for l in range(layer_idx + 1, len(model.transformer.h)):
+        x = model.transformer.h[l](x, use_cache=False)
+        x = x[0] if isinstance(x, tuple) else x
+    x = model.transformer.ln_f(x)
+    logits = model.lm_head(x)
+    return logits
+
+def load_and_pack_texts(cfg: SequenceOracleConfig, tokenizer) -> torch.Tensor:
+
+    cache_dir = Path(cfg.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = cache_stem(cfg)
+    cache_path = cache_dir / f"{stem}__chunks.pt"
+    if cache_path.exists():
+        print(f"[cache] loading chunks from {cache_path}")
+        return torch.load(cache_path)
+    
+    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split)
+    token_blocks = []
+    total_texts = 0
+    print("[data] tokenizing and packing texts...")
+    for ex in ds:
+        text = ex["text"]
+        if not isinstance(text, str) or not text.strip():
+            continue
+        ids = tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        if ids.numel() < cfg.block_size:
+            continue
+
+        n_blocks = ids.numel() // cfg.block_size
+        ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
+        token_blocks.append(ids)
+        total_texts += 1
+        if total_texts >= cfg.max_texts:
+            break
+    if not token_blocks:
+        raise ValueError("No usable token blocks found.")
+
+    chunks = torch.cat(token_blocks, dim=0)
+    chunks = chunks[: cfg.max_chunks]
+    print(f"[data] packed {chunks.shape[0]} chunks from {total_texts} texts")
+    torch.save(chunks.cpu(), cache_path)
+    return chunks
 
 def build_head_groups(
     selected_heads: List[int],
     group_size: int,
     strategy: str,
     manual_head_groups: str,
-    max_head_groups: int,
+    max_head_groups: int
 ) -> List[List[int]]:
     if strategy == "manual":
         if not manual_head_groups.strip():
@@ -164,293 +240,44 @@ def build_head_groups(
     return groups
 
 
-def build_candidate_assignments(replace_mode: str, unit_size: int) -> List[Tuple[str, ...]]:
-    if replace_mode == "multi_head_single_pos_shared":
-        return [(learner,) * unit_size for learner in BASE_LEARNERS]
-    elif replace_mode == "multi_head_single_pos_per_head":
-        return list(itertools.product(BASE_LEARNERS, repeat=unit_size))
-    else:
-        raise ValueError(f"Unsupported replace_mode={replace_mode}")
-
-
-def candidate_name(assign: Sequence[str]) -> str:
-    return "+".join(assign)
-
-
-# ============================================================
-# data / model loading
-# ============================================================
-
-def load_and_pack_texts(cfg: BenchConfig, tokenizer) -> torch.Tensor:
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    stem = cache_stem(cfg)
-    cache_path = cache_dir / f"{stem}__chunks.pt"
-
-    if cache_path.exists():
-        print(f"[cache] loading chunks from {cache_path}")
-        return torch.load(cache_path)
-
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split)
-
-    token_blocks = []
-    total_texts = 0
-
-    print("[data] tokenizing and packing texts...")
-    for ex in ds:
-        text = ex[cfg.text_field]
-        if not isinstance(text, str) or not text.strip():
-            continue
-
-        ids = tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
-        if ids.numel() < cfg.block_size:
-            continue
-
-        n_blocks = ids.numel() // cfg.block_size
-        ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
-        token_blocks.append(ids)
-
-        total_texts += 1
-        if total_texts >= cfg.max_texts:
-            break
-
-    if not token_blocks:
-        raise ValueError("No usable token blocks found.")
-
-    chunks = torch.cat(token_blocks, dim=0)
-    chunks = chunks[: cfg.max_chunks]
-    print(f"[data] packed {chunks.shape[0]} chunks from {total_texts} texts")
-    torch.save(chunks.cpu(), cache_path)
-    return chunks
-
-
-@torch.no_grad()
-def get_input_embeddings_gpt2(model, input_ids: torch.Tensor) -> torch.Tensor:
-    device = input_ids.device
-    _, seqlen = input_ids.shape
-    transformer = model.transformer
-    pos_ids = torch.arange(seqlen, device=device).unsqueeze(0)
-    tok_emb = transformer.wte(input_ids)
-    pos_emb = transformer.wpe(pos_ids)
-    hidden_states = tok_emb + pos_emb
-    hidden_states = transformer.drop(hidden_states)
-    return hidden_states
-
-
-@torch.no_grad()
-def run_to_block_input_gpt2(model, input_ids: torch.Tensor, layer_idx: int) -> torch.Tensor:
-    x = get_input_embeddings_gpt2(model, input_ids)
-    blocks = model.transformer.h
-
-    if layer_idx < 0 or layer_idx >= len(blocks):
-        raise ValueError(f"layer_idx={layer_idx} invalid for {len(blocks)} blocks")
-
-    for l in range(layer_idx):
-        x = first_tensor(blocks[l](x, use_cache=False))
-    return x
-
-
-@torch.no_grad()
-def extract_head_qkv_and_teacher_outputs_gpt2(model, x_in: torch.Tensor, layer_idx: int):
-    block = model.transformer.h[layer_idx]
-    attn_module = block.attn
-
-    h_ln1 = block.ln_1(x_in)  # (B,L,D)
-    qkv = attn_module.c_attn(h_ln1)  # (B,L,3D)
-    split_size = attn_module.split_size
-    q_raw, k_raw, v_raw = qkv.split(split_size, dim=2)
-
-    num_heads = attn_module.num_heads
-    head_dim = attn_module.head_dim
-
-    q = split_heads(q_raw, num_heads, head_dim)
-    k = split_heads(k_raw, num_heads, head_dim)
-    v = split_heads(v_raw, num_heads, head_dim)
-
-    z_teacher = causal_soft_attention_from_qkv(q, k, v)
-    zcat_teacher = merge_heads(z_teacher)
-
-    return h_ln1, q, k, v, z_teacher, zcat_teacher, block, attn_module
-
-
-@torch.no_grad()
-def cache_block_tensors(model, chunks: torch.Tensor, cfg: BenchConfig):
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    stem = cache_stem(cfg)
-    cache_path = cache_dir / f"{stem}__layer{cfg.layer_idx}__block_tensors.pt"
-
-    if cache_path.exists():
-        print(f"[cache] loading block tensors from {cache_path}")
-        return torch.load(cache_path)
-
-    print("[cache-build] extracting block tensors...")
-    n_chunks = chunks.shape[0]
-    n_batches = math.ceil(n_chunks / cfg.batch_size)
-
-    x_in_all = []
-    q_all = []
-    k_all = []
-    v_all = []
-    z_teacher_all = []
-    zcat_teacher_all = []
-
-    for batch_idx, start in enumerate(range(0, n_chunks, cfg.batch_size)):
-        batch_ids = list(range(start, min(start + cfg.batch_size, n_chunks)))
-        batch_input_ids = chunks[batch_ids].to(cfg.device)
-
-        x_in = run_to_block_input_gpt2(model, batch_input_ids, cfg.layer_idx)
-        _, q, k, v, z_teacher, zcat_teacher, _, _ = extract_head_qkv_and_teacher_outputs_gpt2(
-            model, x_in, cfg.layer_idx
-        )
-
-        x_in_all.append(x_in.cpu())
-        q_all.append(q.cpu())
-        k_all.append(k.cpu())
-        v_all.append(v.cpu())
-        z_teacher_all.append(z_teacher.cpu())
-        zcat_teacher_all.append(zcat_teacher.cpu())
-
-        if batch_idx % 5 == 0 or batch_idx == n_batches - 1:
-            print(f"[cache-build] batch {batch_idx+1}/{n_batches} chunks {batch_ids[0]}..{batch_ids[-1]}")
-
-    out = {
-        "x_in": torch.cat(x_in_all, dim=0),
-        "q": torch.cat(q_all, dim=0),
-        "k": torch.cat(k_all, dim=0),
-        "v": torch.cat(v_all, dim=0),
-        "z_teacher": torch.cat(z_teacher_all, dim=0),
-        "zcat_teacher": torch.cat(zcat_teacher_all, dim=0),
-    }
-    torch.save(out, cache_path)
-    print(f"[cache] saved block tensors to {cache_path}")
-    return out
-
-
-@torch.no_grad()
-def continue_from_modified_block_gpt2(model, block, x_in: torch.Tensor, zcat_mod: torch.Tensor, layer_idx: int):
-    attn_out = block.attn.c_proj(zcat_mod)
-    attn_out = block.attn.resid_dropout(attn_out)
-
-    x = x_in + attn_out
-    residual = x
-    x_ln2 = block.ln_2(x)
-    mlp_out = block.mlp(x_ln2)
-    x = residual + mlp_out
-
-    for l in range(layer_idx + 1, len(model.transformer.h)):
-        x = first_tensor(model.transformer.h[l](x, use_cache=False))
-
-    x = model.transformer.ln_f(x)
-    logits = model.lm_head(x)
-    return logits
-
-
-# ============================================================
-# scoring helpers
-# ============================================================
+def head_slice(head_idx: int, head_dim: int) -> slice:
+    return slice(head_idx * head_dim, (head_idx + 1) * head_dim)
 
 @torch.no_grad()
 def mean_next_token_nll(
-    logits: torch.Tensor,          # (B,L,V)
-    input_ids: torch.Tensor,       # (B,L)
-    positions: List[int],          # positions whose next token we score
+    logits: torch.Tensor, 
+    input_ids: torch.Tensor, 
+    positions: List[int]
 ) -> torch.Tensor:
-    # returns (B,)
     if len(positions) == 0:
         raise ValueError("positions must be non-empty")
-
+    
     device = logits.device
     pos_t = torch.tensor(positions, device=device, dtype=torch.long)
     target_t = pos_t + 1
 
-    log_probs = F.log_softmax(logits[:, pos_t, :], dim=-1)  # (B,P,V)
-    targets = input_ids[:, target_t]                        # (B,P)
-    nll = -log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)  # (B,P)
+    log_probs = F.log_softmax(logits[:, pos_t, :], dim=-1)
+    targets = input_ids[:, target_t]    
+    nll = -log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
     return nll.mean(dim=-1)
-
-
-def head_slice(head_idx: int, head_dim: int) -> slice:
-    return slice(head_idx * head_dim, (head_idx + 1) * head_dim)
-
-
-# ============================================================
-# learner prediction cache per chunk/unit/position
-# ============================================================
-
-@torch.no_grad()
-def build_position_assignment_predictions(
-    q: torch.Tensor,                # (1,H,L,Dh)
-    k: torch.Tensor,                # (1,H,L,Dh)
-    v: torch.Tensor,                # (1,H,L,Dh)
-    unit: List[int],
-    positions: List[int],
-    assignments: List[Tuple[str, ...]],
-    eval_cfg: EvalConfig,
-) -> Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]]:
-    """
-    Returns:
-      preds[pos][assignment][head_idx] = predicted vector (Dh,)
-    """
-    preds: Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]] = {}
-
-    for pos in positions:
-        q_pos = {}
-        ctx = {}
-        for h in unit:
-            q_pos[h] = q[:, h, pos, :]           # (1,Dh)
-            ctx[h] = (
-                k[:, h, :pos + 1, :],           # (1,pos+1,Dh)
-                v[:, h, :pos + 1, :],
-            )
-
-        preds[pos] = {}
-        for assign in assignments:
-            head_pred = {}
-            for h, learner in zip(unit, assign):
-                Kctx, Vctx = ctx[h]
-                pred = LEARNER_REGISTRY.predict(learner, q_pos[h], Kctx, Vctx, eval_cfg)[0]
-                head_pred[h] = pred
-            preds[pos][assign] = head_pred
-
-    return preds
-
-
-@torch.no_grad()
-def apply_assignment_at_position(
-    zcat: torch.Tensor,     # (1,L,D)
-    pos: int,
-    unit: List[int],
-    assign: Tuple[str, ...],
-    preds: Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]],
-    head_dim: int,
-) -> torch.Tensor:
-    out = zcat.clone()
-    for h in unit:
-        out[0, pos, head_slice(h, head_dim)] = preds[pos][assign][h]
-    return out
 
 
 @torch.no_grad()
 def apply_sequence_assignment(
-    zcat_teacher: torch.Tensor,  # (1,L,D)
-    unit: List[int],
+    zcat_teacher: torch.Tensor,
+    group: List[int],
     positions: List[int],
-    per_pos_assign: Dict[int, Tuple[str, ...]],
+    per_pos_assignment: Dict[int, Tuple[str, ...]],
     preds: Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]],
     head_dim: int,
 ) -> torch.Tensor:
     out = zcat_teacher.clone()
-    for pos in positions:
-        assign = per_pos_assign[pos]
-        for h in unit:
-            out[0, pos, head_slice(h, head_dim)] = preds[pos][assign][h]
+    for pos in positions: 
+        assignment = per_pos_assignment[pos]
+        for h in group:
+            out[0, pos, head_slice(h, head_dim)] = preds[pos][assignment][h]
     return out
 
-
-# ============================================================
-# sequence-level assignment strategies
-# ============================================================
 
 @torch.no_grad()
 def best_local_assignment_per_position(
@@ -459,25 +286,25 @@ def best_local_assignment_per_position(
     x_in: torch.Tensor,
     input_ids: torch.Tensor,
     zcat_teacher: torch.Tensor,
-    unit: List[int],
+    group: List[int],
     positions: List[int],
     assignments: List[Tuple[str, ...]],
     preds: Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]],
     head_dim: int,
     layer_idx: int,
 ) -> Dict[int, Tuple[str, ...]]:
-    """
-    Isolated local oracle for each position:
-    choose the assignment minimizing NLL when only that one position is replaced.
-    """
-    best: Dict[int, Tuple[str, ...]] = {}
-    for pos in positions:
+    """Isolated local oracle for eachc position: i.e choose the assignment that
+    minimizes NLL when only that one position is replaced"""
+    best = {}
+    for pos in positions: 
         cand_zcats = []
-        for assign in assignments:
-            cand_zcats.append(
-                apply_assignment_at_position(zcat_teacher, pos, unit, assign, preds, head_dim)
-            )
-        zcat_batch = torch.cat(cand_zcats, dim=0)
+        for assignment in assignments: 
+            zcat_mod = zcat_teacher.clone()
+            for h in group:
+                # replacing the attention output for this head at this position with the learner prediction
+                zcat_mod[0, pos, head_slice(h, head_dim)] = preds[pos][assignment][h]
+            cand_zcats.append(zcat_mod)
+        zcat_batch = torch.cat(cand_zcats, dim= 0)
         x_rep = x_in.repeat(len(assignments), 1, 1)
         logits = continue_from_modified_block_gpt2(
             model=model,
@@ -493,13 +320,13 @@ def best_local_assignment_per_position(
 
 
 @torch.no_grad()
-def greedy_suffix_sequence_assignment(
+def greedy_sequence_assignment(
     model,
     block,
     x_in: torch.Tensor,
     input_ids: torch.Tensor,
     zcat_teacher: torch.Tensor,
-    unit: List[int],
+    group: List[int],
     positions: List[int],
     assignments: List[Tuple[str, ...]],
     preds: Dict[int, Dict[Tuple[str, ...], Dict[int, torch.Tensor]]],
@@ -512,16 +339,16 @@ def greedy_suffix_sequence_assignment(
     suffix mean NLL from current position onward, given earlier committed choices.
     Future positions remain teacher until chosen.
     """
-    committed: Dict[int, Tuple[str, ...]] = {}
-    current_zcat = zcat_teacher.clone()
 
+    committed = {}
+    current_zcat = zcat_teacher.clone()
     for i, pos in enumerate(positions):
         suffix_positions = positions[i:]
         cand_zcats = []
-        for assign in assignments:
+        for assignment in assignments:
             z = current_zcat.clone()
-            for h in unit:
-                z[0, pos, head_slice(h, head_dim)] = preds[pos][assign][h]
+            for h in group:
+                z[0, pos, head_slice(h, head_dim)] = preds[pos][assignment][h]
             cand_zcats.append(z)
 
         zcat_batch = torch.cat(cand_zcats, dim=0)
@@ -536,57 +363,55 @@ def greedy_suffix_sequence_assignment(
         losses = mean_next_token_nll(logits, input_ids.repeat(len(assignments), 1), suffix_positions)
         best_idx = int(losses.argmin().item())
         best_assign = assignments[best_idx]
-
         committed[pos] = best_assign
-        for h in unit:
+        for h in group:
             current_zcat[0, pos, head_slice(h, head_dim)] = preds[pos][best_assign][h]
 
     return committed
 
-
-# ============================================================
-# main benchmark
-# ============================================================
-
-@torch.no_grad()
-def evaluate_sequence_unit(
+def evaluate_head_group(
     model,
     block,
-    input_ids: torch.Tensor,       # (1,L)
-    x_in: torch.Tensor,            # (1,L,D)
-    q: torch.Tensor,               # (1,H,L,Dh)
-    k: torch.Tensor,               # (1,H,L,Dh)
-    v: torch.Tensor,               # (1,H,L,Dh)
-    zcat_teacher: torch.Tensor,    # (1,L,D)
-    unit: List[int],
-    cfg: BenchConfig,
+    input_ids: torch.Tensor,
+    x_in: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    zcat_teacher: torch.Tensor,
+    group: List[int],
+    cfg: SequenceOracleConfig,
     head_dim: int,
     assignments: List[Tuple[str, ...]],
     positions: List[int],
 ):
-    eval_cfg = make_eval_cfg(cfg, head_dim)
-
-    preds = build_position_assignment_predictions(
-        q=q,
-        k=k,
-        v=v,
-        unit=unit,
-        positions=positions,
-        assignments=assignments,
-        eval_cfg=eval_cfg,
-    )
-
-    # --------------------------------------------------------
-    # sequence-level fixed homogeneous / fixed assignment scores
-    # --------------------------------------------------------
+    preds = {}
+    for pos in positions:
+        q_pos = {}
+        ctx = {}
+        for h in group:
+            q_pos[h] = q[:, h, pos, :]
+            ctx[h] = (
+                k[:, h, :pos + 1, :],
+                v[:, h, :pos + 1, :],
+            )
+        preds[pos] = {}
+        for assignment in assignments:
+            head_pred = {}
+            for h, learner in zip(group, assignment):
+                Kctx, Vctx = ctx[h]
+                pred = LEARNER_REGISTRY.predict(learner, q_pos[h], Kctx, Vctx, cfg)[0]
+                head_pred[h] = pred
+            preds[pos][assignment] = head_pred
+    
+    # sequence-level fixed assignment
     fixed_losses = {}
-    for assign in assignments:
-        per_pos_assign = {pos: assign for pos in positions}
+    for assignment in assignments:
+        per_pos_assign = {pos: assignment for pos in positions}
         zcat_mod = apply_sequence_assignment(
             zcat_teacher=zcat_teacher,
-            unit=unit,
+            group=group,
             positions=positions,
-            per_pos_assign=per_pos_assign,
+            per_pos_assignment=per_pos_assign,
             preds=preds,
             head_dim=head_dim,
         )
@@ -595,34 +420,34 @@ def evaluate_sequence_unit(
             block=block,
             x_in=x_in,
             zcat_mod=zcat_mod,
-            layer_idx=cfg.layer_idx,
+            layer_idx=cfg.layer_idx
         )
-        fixed_losses[assign] = float(mean_next_token_nll(logits, input_ids, positions).item())
+        fixed_losses[assignment] = float(mean_next_token_nll(logits, input_ids, positions).item())
 
-    # --------------------------------------------------------
-    # local-pick then jointly apply
-    # --------------------------------------------------------
+    # locally find best learner then apply jointly and measure loss
     local_best_assign = best_local_assignment_per_position(
         model=model,
         block=block,
         x_in=x_in,
         input_ids=input_ids,
         zcat_teacher=zcat_teacher,
-        unit=unit,
+        group=group,
         positions=positions,
         assignments=assignments,
         preds=preds,
         head_dim=head_dim,
         layer_idx=cfg.layer_idx,
     )
+
     zcat_local_joint = apply_sequence_assignment(
         zcat_teacher=zcat_teacher,
-        unit=unit,
+        group=group,
         positions=positions,
-        per_pos_assign=local_best_assign,
+        per_pos_assignment=local_best_assign,
         preds=preds,
         head_dim=head_dim,
     )
+
     logits_local_joint = continue_from_modified_block_gpt2(
         model=model,
         block=block,
@@ -632,16 +457,16 @@ def evaluate_sequence_unit(
     )
     local_joint_loss = float(mean_next_token_nll(logits_local_joint, input_ids, positions).item())
 
-    # --------------------------------------------------------
-    # greedy suffix sequence oracle
-    # --------------------------------------------------------
-    greedy_assign = greedy_suffix_sequence_assignment(
+
+    # greedily assign
+
+    greedy_assign = greedy_sequence_assignment(
         model=model,
         block=block,
         x_in=x_in,
         input_ids=input_ids,
         zcat_teacher=zcat_teacher,
-        unit=unit,
+        group=group,
         positions=positions,
         assignments=assignments,
         preds=preds,
@@ -650,9 +475,9 @@ def evaluate_sequence_unit(
     )
     zcat_greedy = apply_sequence_assignment(
         zcat_teacher=zcat_teacher,
-        unit=unit,
+        group=group,
         positions=positions,
-        per_pos_assign=greedy_assign,
+        per_pos_assignment=greedy_assign,
         preds=preds,
         head_dim=head_dim,
     )
@@ -674,17 +499,11 @@ def evaluate_sequence_unit(
     }
 
 
-@torch.no_grad()
-def run_benchmark(cfg: BenchConfig):
-    print("[config]")
-    for k, v in vars(cfg).items():
-        print(f"  {k}: {v}")
-
-    print("[setup] loading tokenizer/model...")
+def run_oracle_eval(cfg: SequenceOracleConfig):
+    print("[setup] loading tokenizer/model")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
     model = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(cfg.device)
     model.eval()
     for p in model.parameters():
@@ -692,52 +511,69 @@ def run_benchmark(cfg: BenchConfig):
 
     if not hasattr(model, "transformer") or not hasattr(model.transformer, "h"):
         raise ValueError("This script is GPT-2 style specific.")
-
+    
     print("[setup] loading and packing text...")
-    chunks = load_and_pack_texts(cfg, tokenizer).to(cfg.device)
-    cached = cache_block_tensors(model, chunks, cfg)
 
-    n_heads = cached["q"].shape[1]
-    head_dim = cached["q"].shape[-1]
-    selected_heads = parse_head_indices(cfg.head_indices, n_heads)
-    units = build_head_groups(
+    chunks = load_and_pack_texts(cfg, tokenizer).to(cfg.device)
+    block_tensors = run_to_block_and_cache_tensors(model, chunks, cfg)
+
+    n_heads = block_tensors["q"].shape[1]
+    head_dim = block_tensors["q"].shape[-1]
+
+    if cfg.head_indices == "all":
+        selected_heads = list(range(n_heads))
+    else:
+        selected_heads = [int(x.strip()) for x in cfg.head_indices.split(",") if x.strip()]
+        
+    for h in selected_heads:
+        if h < 0 or h >= n_heads:
+            raise ValueError(f"Head index {h} out of range [0, {n_heads-1}]")
+    
+    head_groups = build_head_groups(
         selected_heads=selected_heads,
         group_size=cfg.head_group_size,
         strategy=cfg.head_group_strategy,
         manual_head_groups=cfg.manual_head_groups,
         max_head_groups=cfg.max_head_groups,
     )
-    assignments = build_candidate_assignments(cfg.replace_mode, cfg.head_group_size)
 
+    if cfg.replace_mode == "multi_head_single_pos_shared":
+        assignments =  [(learner,) * cfg.head_group_size for learner in BASE_LEARNERS]
+    elif cfg.replace_mode == "multi_head_single_pos_per_head":
+        assignments =  list(itertools.product(BASE_LEARNERS, repeat=cfg.head_group_size))
+    else:
+        raise ValueError(f"Unsupported replace_mode={cfg.replace_mode}")
+    
     print(f"[setup] total chunks={chunks.shape[0]}, layer={cfg.layer_idx}, mode={cfg.replace_mode}")
     print(f"[setup] selected heads={selected_heads}")
-    print(f"[setup] intervention units={units}")
+    print(f"[setup] intervention units={head_groups}")
     print(f"[setup] candidate assignments={len(assignments)}")
 
-    dummy_x = cached["x_in"][:1].to(cfg.device)
+    dummy_x = block_tensors["x_in"][:1].to(cfg.device)
     _, _, _, _, _, _, block, attn_module = extract_head_qkv_and_teacher_outputs_gpt2(model, dummy_x, cfg.layer_idx)
     assert head_dim == attn_module.head_dim
-
+    
     positions_template = list(range(cfg.min_context, cfg.block_size - 1, cfg.position_stride))
 
     fixed_losses_all = []
     local_joint_all = []
     greedy_all = []
-    unit_ids_all = []
+    group_ids_all = []
 
     total_examples = 0
     for chunk_id in range(chunks.shape[0]):
         input_ids_1 = chunks[chunk_id:chunk_id + 1]
-        x_in_1 = cached["x_in"][chunk_id:chunk_id + 1].to(cfg.device)
-        q_1 = cached["q"][chunk_id:chunk_id + 1].to(cfg.device)
-        k_1 = cached["k"][chunk_id:chunk_id + 1].to(cfg.device)
-        v_1 = cached["v"][chunk_id:chunk_id + 1].to(cfg.device)
-        zcat_teacher_1 = cached["zcat_teacher"][chunk_id:chunk_id + 1].to(cfg.device)
+        x_in_1 = block_tensors["x_in"][chunk_id:chunk_id + 1].to(cfg.device)
+        q_1 = block_tensors["q"][chunk_id:chunk_id + 1].to(cfg.device)
+        k_1 = block_tensors["k"][chunk_id:chunk_id + 1].to(cfg.device)
+        v_1 = block_tensors["v"][chunk_id:chunk_id + 1].to(cfg.device)
+        zcat_teacher_1 = block_tensors["zcat_teacher"][chunk_id:chunk_id + 1].to(cfg.device)
 
         positions = [p for p in positions_template if p < input_ids_1.shape[1] - 1]
 
-        for unit_idx, unit in enumerate(units):
-            out = evaluate_sequence_unit(
+        for group_idx, group in enumerate(head_groups):
+            print(f"Chunk {chunk_id} : evaluating heads {group}")
+            out = evaluate_head_group(
                 model=model,
                 block=block,
                 input_ids=input_ids_1,
@@ -746,7 +582,7 @@ def run_benchmark(cfg: BenchConfig):
                 k=k_1,
                 v=v_1,
                 zcat_teacher=zcat_teacher_1,
-                unit=unit,
+                group=group,
                 cfg=cfg,
                 head_dim=head_dim,
                 assignments=assignments,
@@ -754,35 +590,33 @@ def run_benchmark(cfg: BenchConfig):
             )
 
             fixed_losses_vec = torch.tensor(
-                [[out["fixed_losses"][assign] for assign in assignments]],
+                [[out["fixed_losses"][assignment] for assignment in assignments]],
                 dtype=torch.float32,
             )
             fixed_losses_all.append(fixed_losses_vec)
             local_joint_all.append(torch.tensor([out["local_joint_loss"]], dtype=torch.float32))
             greedy_all.append(torch.tensor([out["greedy_loss"]], dtype=torch.float32))
-            unit_ids_all.append(torch.tensor([unit_idx], dtype=torch.long))
+            group_ids_all.append(torch.tensor([group_idx], dtype=torch.long))
             total_examples += 1
-
         if chunk_id % 8 == 0 or chunk_id == chunks.shape[0] - 1:
             print(f"[bench] chunk {chunk_id+1}/{chunks.shape[0]} examples so far={total_examples}")
-
     return {
         "assignments": assignments,
-        "units": units,
-        "fixed_losses": torch.cat(fixed_losses_all, dim=0),  # (N, A)
-        "local_joint_losses": torch.cat(local_joint_all, dim=0),  # (N,)
-        "greedy_losses": torch.cat(greedy_all, dim=0),  # (N,)
-        "unit_ids": torch.cat(unit_ids_all, dim=0),  # (N,)
+        "groups": head_groups,
+        "fixed_losses": torch.cat(fixed_losses_all, dim=0),
+        "local_joint_losses": torch.cat(local_joint_all, dim=0),
+        "greedy_losses": torch.cat(greedy_all, dim=0),
+        "unit_ids": torch.cat(group_ids_all, dim=0),
     }
 
 
-# ============================================================
-# summarization
-# ============================================================
+
+def candidate_name(assign: Sequence[str]) -> str:
+    return "+".join(assign)
 
 def summarize(results: Dict[str, torch.Tensor]):
     assignments = results["assignments"]
-    units = results["units"]
+    units = results["groups"]
     fixed_losses = results["fixed_losses"]
     local_joint_losses = results["local_joint_losses"]
     greedy_losses = results["greedy_losses"]
@@ -824,35 +658,19 @@ def summarize(results: Dict[str, torch.Tensor]):
         print(f"  group={','.join(map(str, unit)):<12} {stats_str}")
 
 
-# ============================================================
-# CLI
-# ============================================================
 
 def main():
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--model_name", type=str, default="openai-community/gpt2")
     parser.add_argument("--dataset_name", type=str, default="wikitext")
     parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1")
-    parser.add_argument("--split", type=str, default="validation")
-    parser.add_argument("--text_field", type=str, default="text")
-
-    parser.add_argument("--max_texts", type=int, default=200)
     parser.add_argument("--block_size", type=int, default=96)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_chunks", type=int, default=64)
 
     parser.add_argument("--layer_idx", type=int, default=4)
     parser.add_argument("--head_indices", type=str, default="all")
-    parser.add_argument("--min_context", type=int, default=16)
     parser.add_argument("--position_stride", type=int, default=8)
-
-    parser.add_argument("--beta_soft", type=float, default=6.0)
-    parser.add_argument("--k_sharp", type=int, default=4)
-    parser.add_argument("--window_size", type=int, default=16)
-    parser.add_argument("--k_linear_local", type=int, default=16)
-    parser.add_argument("--ridge_lambda", type=float, default=1e-1)
-
     parser.add_argument("--replace_mode", type=str, default="multi_head_single_pos_per_head",
                         choices=["multi_head_single_pos_shared", "multi_head_single_pos_per_head"])
     parser.add_argument("--head_group_size", type=int, default=2)
@@ -861,29 +679,20 @@ def main():
     parser.add_argument("--manual_head_groups", type=str, default="")
     parser.add_argument("--max_head_groups", type=int, default=0)
 
-    parser.add_argument("--oracle_mode", type=str, default="greedy_suffix",
-                        choices=["greedy_suffix", "local_then_joint"])
-    parser.add_argument("--save_results", action="store_true")
-    parser.add_argument("--output_dir", type=str, default="outputs/head_counterfactual_results")
-    parser.add_argument("--cache_dir", type=str, default="outputs/head_counterfactual_cache")
 
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    cfg = SequenceOracleConfig()
+    print("[config]")
+    for k, v in vars(cfg).items():
+        print(f"  {k}: {v}")
+    random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
 
-    args = parser.parse_args()
-    cfg = BenchConfig(**vars(args))
+    results = run_oracle_eval(cfg)
 
-    set_seed(cfg.seed)
-    results = run_benchmark(cfg)
+
     summarize(results)
-
-    print("\n=== Interpretation guide ===")
-    print("1) best_fixed = one homogeneous learner assignment used at all sampled positions in the sequence.")
-    print("2) local_then_joint = choose best assignment per position from isolated local interventions, then apply them jointly.")
-    print("3) greedy_suffix_oracle = stronger sequence-level heterogeneous selector, chosen left-to-right using suffix NLL.")
-    print("4) greedy_suffix_oracle is still not the exact omniscient global oracle over all position assignments.")
-    print("5) If greedy_suffix_oracle beats best_fixed by a lot, that supports sequence-level heterogeneity strong enough to motivate selector architectures.")
-
-
+    
 if __name__ == "__main__":
     main()

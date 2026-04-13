@@ -3,26 +3,26 @@
 Evaluation results
 task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global     uniform_mix          oracle          winner
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-piecewise_linear               32.150279       39.455362       32.072606       38.232799       38.150405       32.556869       63.494257       33.139637       27.843223     window_soft
-prototype_lookup                0.399074        0.399542        1.192610        0.307053        0.622702        0.918051        0.984371        0.373422        0.215148 weighted_linear
-smooth_nonlinear_local          0.493674        0.607884        0.514753        0.228991        0.607405        0.495566        0.400447        0.407187        0.162138 weighted_linear
-shifted_local_map               1.546507        1.274928        1.386378        0.727835        1.290415        1.818573        1.503637        1.174579        0.618354 weighted_linear
+piecewise_linear               32.217110       39.464646       32.080553       38.382123       38.206771       32.725585       63.330917       33.195997       27.933885     window_soft
+prototype_lookup                0.399628        0.400020        1.197980        0.304491        0.626705        0.917792        0.965281        0.374884        0.214241 weighted_linear
+smooth_nonlinear_local          0.522365        0.647821        0.544708        0.233994        0.647199        0.524521        0.421708        0.428561        0.167244 weighted_linear
+shifted_local_map               1.597338        1.362286        1.450601        0.830464        1.365691        1.847612        1.594185        1.244237        0.698000 weighted_linear
 
 Oracle gap analysis
 -------------------
-piecewise_linear         best_fixed=32.072606  oracle=27.843223  oracle_gain=4.229383 (13.19%)  uniform_mix=33.139637  uniform_gap=-1.067031 (-3.33%)
-prototype_lookup         best_fixed=0.307053  oracle=0.215148  oracle_gain=0.091905 (29.93%)  uniform_mix=0.373422  uniform_gap=-0.066369 (-21.61%)
-smooth_nonlinear_local   best_fixed=0.228991  oracle=0.162138  oracle_gain=0.066853 (29.19%)  uniform_mix=0.407187  uniform_gap=-0.178195 (-77.82%)
-shifted_local_map        best_fixed=0.727835  oracle=0.618354  oracle_gain=0.109481 (15.04%)  uniform_mix=1.174579  uniform_gap=-0.446744 (-61.38%)
+piecewise_linear         best_fixed=32.080553  oracle=27.933885  oracle_gain=4.146668 (12.93%)  uniform_mix=33.195997  uniform_gap=-1.115444 (-3.48%)
+prototype_lookup         best_fixed=0.304491  oracle=0.214241  oracle_gain=0.090250 (29.64%)  uniform_mix=0.374884  uniform_gap=-0.070393 (-23.12%)
+smooth_nonlinear_local   best_fixed=0.233994  oracle=0.167244  oracle_gain=0.066750 (28.53%)  uniform_mix=0.428561  uniform_gap=-0.194567 (-83.15%)
+shifted_local_map        best_fixed=0.830464  oracle=0.698000  oracle_gain=0.132463 (15.95%)  uniform_mix=1.244237  uniform_gap=-0.413773 (-49.82%)
 
 Oracle winner fractions
 -----------------------
 task family                         soft           sharp     window_soft weighted_linear        knn_meanlinear_attention   linear_global
 ----------------------------------------------------------------------------------------------------------------------------------------
-piecewise_linear                   0.131           0.042           0.322           0.100           0.060           0.257           0.089
-prototype_lookup                   0.352           0.078           0.032           0.249           0.128           0.145           0.015
-smooth_nonlinear_local             0.012           0.025           0.031           0.743           0.033           0.045           0.111
-shifted_local_map                  0.008           0.029           0.075           0.714           0.027           0.010           0.137
+piecewise_linear                   0.126           0.046           0.328           0.091           0.061           0.257           0.092
+prototype_lookup                   0.355           0.077           0.030           0.251           0.130           0.144           0.013
+smooth_nonlinear_local             0.010           0.025           0.030           0.749           0.032           0.045           0.108
+shifted_local_map                  0.011           0.030           0.075           0.694           0.033           0.021           0.136
 
 
 === Multi-seed average (seeds: 0, 1, 2, 3, 4) ===

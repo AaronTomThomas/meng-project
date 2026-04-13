@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import math
 import random
-from typing import List, Sequence
+import sys
+from typing import Iterator, List, Sequence
 
 import torch
 
@@ -68,9 +71,9 @@ def merge_heads(x: torch.Tensor) -> torch.Tensor:
 
 
 def causal_soft_attention_from_qkv(
-    q: torch.Tensor,  # (B,H,L,Dh)
-    k: torch.Tensor,  # (B,H,L,Dh)
-    v: torch.Tensor,  # (B,H,L,Dh)
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
 ) -> torch.Tensor:
     B, H, L, Dh = q.shape
     scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(Dh)
@@ -83,3 +86,28 @@ def causal_soft_attention_from_qkv(
 
     attn = torch.softmax(scores, dim=-1)
     return torch.matmul(attn, v)
+
+
+@contextlib.contextmanager
+def tee_stdout(log_path: str | None) -> Iterator[None]:
+    if not log_path:
+        yield
+        return
+
+    original = sys.stdout
+    with open(log_path, "w") as fh:
+        class Tee(io.TextIOBase):
+            def write(self_inner, data: str) -> int:
+                original.write(data)
+                fh.write(data)
+                return len(data)
+
+            def flush(self_inner) -> None:
+                original.flush()
+                fh.flush()
+
+        sys.stdout = Tee()
+        try:
+            yield
+        finally:
+            sys.stdout = original

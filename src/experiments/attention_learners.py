@@ -1,8 +1,18 @@
+from dataclasses import dataclass
 import math
 from typing import Dict, List, Type
-from experiments.synthetic_alignment.config import EvalConfig
 import torch
 import torch.nn.functional as F
+
+
+@dataclass
+class LearnerHyperParams:
+    beta_soft: float = 6.0
+    window_size: int = 16
+    k_knn_mean: int = 4
+    ridge_lambda: float = 1e-1
+    k_linear_local: int = 16
+    k_sharp: int = 2
 
 
 class BaseAttentionLearner:
@@ -15,7 +25,7 @@ class BaseAttentionLearner:
         q: torch.Tensor,
         Kctx: torch.Tensor,
         Vctx: torch.Tensor,
-        cfg: EvalConfig,
+        cfg: LearnerHyperParams,
     ) -> torch.Tensor:
         return self.predict(q, Kctx, Vctx, cfg)
 
@@ -25,7 +35,7 @@ class BaseAttentionLearner:
         q: torch.Tensor,
         Kctx: torch.Tensor,
         Vctx: torch.Tensor,
-        cfg: EvalConfig,
+        cfg: LearnerHyperParams,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -36,7 +46,7 @@ class BaseAttentionLearner:
         Kctx: torch.Tensor,
         Vctx: torch.Tensor,
         target: torch.Tensor,
-        cfg: EvalConfig,
+        cfg: LearnerHyperParams,
     ) -> torch.Tensor:
         pred = self.predict(q, Kctx, Vctx, cfg)
         return ((pred - target) ** 2).mean(dim=-1)
@@ -247,7 +257,7 @@ def predict_with_learner(
     q: torch.Tensor,
     Kctx: torch.Tensor,
     Vctx: torch.Tensor,
-    cfg: EvalConfig,
+    cfg: LearnerHyperParams,
 ) -> torch.Tensor:
     if learner_name not in LEARNER_CLASSES:
         raise ValueError(f"Unknown learner: {learner_name}")

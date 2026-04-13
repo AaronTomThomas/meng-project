@@ -1,10 +1,11 @@
 
 from dataclasses import dataclass
+from experiments.attention_learners import LearnerHyperParams
 import torch
 
 
 @dataclass
-class EvalConfig:
+class EvalConfig(LearnerHyperParams):
     L: int = 128
     d: int = 32
     dv: int = 16
@@ -13,15 +14,9 @@ class EvalConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     dtype: torch.dtype = torch.float32
 
-    # learner hyperparams
-    beta_soft: float = 6.0
-    k_sharp: int = 2
-    k_linear_local: int = 16
-    ridge_lambda: float = 1e-1
     min_context: int = 8
     retention_decay: float = 0.9
-    window_size: int = 16
-    k_knn_mean: int = 4
+
 
 
 @dataclass
