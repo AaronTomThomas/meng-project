@@ -1,20 +1,26 @@
 import argparse
 from dataclasses import dataclass
-import hashlib
-import itertools
-from pathlib import Path
 import random
 from typing import Dict, List, Sequence, Tuple
 
 from experiments.attention_learners import LearnerHyperParams
-from experiments.language_model_probes.probe_utils import LearnerRegistry, causal_soft_attention_from_qkv, merge_heads, split_heads
+from experiments.language_model_probes.gpt2_probe_utils import (
+    add_shared_cli_args,
+    build_candidate_assignments,
+    build_head_groups,
+    candidate_name,
+    continue_from_modified_block_gpt2,
+    extract_head_qkv_and_teacher_outputs_gpt2,
+    head_slice,
+    load_and_pack_texts,
+    mean_next_token_nll,
+    parse_head_indices,
+    run_to_block_and_cache_tensors,
+)
+from experiments.language_model_probes.probe_utils import LearnerRegistry
 import torch
-import torch.nn.functional as F
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from datasets import load_dataset
-
-import math
 
 BASE_LEARNERS = ["soft", "sharp", "window_soft", "weighted_linear"]
 LEARNER_REGISTRY = LearnerRegistry(BASE_LEARNERS)
@@ -26,6 +32,8 @@ class SequenceOracleConfig(LearnerHyperParams):
     dataset_name: str = "wikitext"
     dataset_config: str = "wikitext-2-raw-v1"
     split: str = "validation"
+
+    text_field: str = "text"
 
     max_texts: int = 200
     block_size: int = 96
@@ -49,219 +57,6 @@ class SequenceOracleConfig(LearnerHyperParams):
 
     seed: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def cache_stem(cfg: SequenceOracleConfig) -> str:
-    key = (
-        f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.split}|"
-        f"maxtexts={cfg.max_texts}|block={cfg.block_size}|maxchunks={cfg.max_chunks}|"
-        f"layer={cfg.layer_idx}|heads={cfg.head_indices}|"
-        f"minctx={cfg.min_context}|stride={cfg.position_stride}|"
-        f"beta={cfg.beta_soft}|ksharp={cfg.k_sharp}|"
-        f"window={cfg.window_size}|klin={cfg.k_linear_local}|ridge={cfg.ridge_lambda}|"
-        f"seed={cfg.seed}"
-    )
-    return hashlib.md5(key.encode()).hexdigest()[:10]
-
-@torch.no_grad()
-def get_input_embeddings_gpt2(model, input_ids: torch.Tensor) -> torch.Tensor:
-    device = input_ids.device
-    _, seqlen = input_ids.shape
-    transformer = model.transformer
-    pos_ids = torch.arange(seqlen, device=device).unsqueeze(0)
-    tok_emb = transformer.wte(input_ids)
-    pos_emb = transformer.wpe(pos_ids)
-    hidden_states = tok_emb + pos_emb
-    hidden_states = transformer.drop(hidden_states)
-    return hidden_states
-
-@torch.no_grad()
-def get_block_input_gpt2(model, input_ids: torch.Tensor, layer_idx: int) -> torch.Tensor:
-    x = get_input_embeddings_gpt2(model, input_ids)
-    blocks = model.transformer.h
-    if layer_idx < 0 or layer_idx >= len(blocks):
-        raise ValueError(f"layer_idx={layer_idx} invalid for {len(blocks)} blocks")
-    for l in range(layer_idx):
-        x = blocks[l](x, use_cache=False)
-        x = x[0] if isinstance(x, tuple) else x
-    return x
-
-
-
-@torch.no_grad()
-def extract_head_qkv_and_teacher_outputs_gpt2(model, x_in: torch.Tensor, layer_idx: int):
-    block = model.transformer.h[layer_idx]
-    attn_module = block.attn
-    h_ln1 = block.ln_1(x_in)
-
-    qkv = attn_module.c_attn(h_ln1)
-    split_size = attn_module.split_size
-    q_raw, k_raw, v_raw = qkv.split(split_size, dim=2)
-
-    num_heads = attn_module.num_heads
-    head_dim = attn_module.head_dim
-
-    q = split_heads(q_raw, num_heads, head_dim)
-    k = split_heads(k_raw, num_heads, head_dim)
-    v = split_heads(v_raw, num_heads, head_dim)
-
-    z_teacher = causal_soft_attention_from_qkv(q, k, v)
-    zcat_teacher = merge_heads(z_teacher)
-    return h_ln1, q, k, v, z_teacher, zcat_teacher, block, attn_module
-    
-def run_to_block_and_cache_tensors(model, chunks: torch.Tensor, cfg: SequenceOracleConfig):
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    stem = cache_stem(cfg)
-    cache_path = cache_dir / f"{stem}__layer{cfg.layer_idx}__block_tensors.pt"
-
-    if cache_path.exists():
-        print(f"[cache] loading block tensors from {cache_path}")
-        return torch.load(cache_path)
-
-    print("[cache-build] extracting block tensors...")
-    n_chunks = chunks.shape[0]
-
-    n_batches = math.ceil(n_chunks / cfg.batch_size)
-    x_in_all = []
-    q_all = []
-    k_all = []
-    v_all = []
-    z_teacher_all = []
-    zcat_teacher_all = []
-
-    for batch_idx, start in enumerate(range(0, n_chunks, cfg.batch_size)):
-        batch_ids = list(range(start, min(start + cfg.batch_size, n_chunks)))
-        batch_input_ids = chunks[batch_ids].to(cfg.device)
-
-        x_in = get_block_input_gpt2(model, batch_input_ids, cfg.layer_idx)
-        _, q, k, v, z_teacher, zcat_teacher, _, _ = extract_head_qkv_and_teacher_outputs_gpt2(
-            model, x_in, cfg.layer_idx
-        )
-        x_in_all.append(x_in.cpu())
-        q_all.append(q.cpu())
-        k_all.append(k.cpu())
-        v_all.append(v.cpu())
-        z_teacher_all.append(z_teacher.cpu())
-        zcat_teacher_all.append(zcat_teacher.cpu())
-        if batch_idx % 5 == 0 or batch_idx == n_batches - 1:
-            print(f"[cache-build] batch {batch_idx+1}/{n_batches} chunks {batch_ids[0]}..{batch_ids[-1]}")
-    out = {
-        "x_in": torch.cat(x_in_all, dim=0),
-        "q": torch.cat(q_all, dim=0),
-        "k": torch.cat(k_all, dim=0),
-        "v": torch.cat(v_all, dim=0),
-        "z_teacher": torch.cat(z_teacher_all, dim=0),
-        "zcat_teacher": torch.cat(zcat_teacher_all, dim=0),
-    }
-    torch.save(out, cache_path)
-    print(f"[cache] saved block tensors to {cache_path}")
-    return out
-
-@torch.no_grad()
-def continue_from_modified_block_gpt2(model, block, x_in: torch.Tensor, zcat_mod: torch.Tensor, layer_idx: int):
-    attn_out = block.attn.c_proj(zcat_mod)
-    attn_out = block.attn.resid_dropout(attn_out)
-    x = x_in + attn_out
-    residual = x
-    x_ln2 = block.ln_2(x)
-    mlp_out = block.mlp(x_ln2)
-    x = residual + mlp_out
-
-    for l in range(layer_idx + 1, len(model.transformer.h)):
-        x = model.transformer.h[l](x, use_cache=False)
-        x = x[0] if isinstance(x, tuple) else x
-    x = model.transformer.ln_f(x)
-    logits = model.lm_head(x)
-    return logits
-
-def load_and_pack_texts(cfg: SequenceOracleConfig, tokenizer) -> torch.Tensor:
-
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    stem = cache_stem(cfg)
-    cache_path = cache_dir / f"{stem}__chunks.pt"
-    if cache_path.exists():
-        print(f"[cache] loading chunks from {cache_path}")
-        return torch.load(cache_path)
-    
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split)
-    token_blocks = []
-    total_texts = 0
-    print("[data] tokenizing and packing texts...")
-    for ex in ds:
-        text = ex["text"]
-        if not isinstance(text, str) or not text.strip():
-            continue
-        ids = tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
-        if ids.numel() < cfg.block_size:
-            continue
-
-        n_blocks = ids.numel() // cfg.block_size
-        ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
-        token_blocks.append(ids)
-        total_texts += 1
-        if total_texts >= cfg.max_texts:
-            break
-    if not token_blocks:
-        raise ValueError("No usable token blocks found.")
-
-    chunks = torch.cat(token_blocks, dim=0)
-    chunks = chunks[: cfg.max_chunks]
-    print(f"[data] packed {chunks.shape[0]} chunks from {total_texts} texts")
-    torch.save(chunks.cpu(), cache_path)
-    return chunks
-
-def build_head_groups(
-    selected_heads: List[int],
-    group_size: int,
-    strategy: str,
-    manual_head_groups: str,
-    max_head_groups: int
-) -> List[List[int]]:
-    if strategy == "manual":
-        if not manual_head_groups.strip():
-            raise ValueError("manual_head_groups required when strategy=manual")
-        groups = []
-        for chunk in manual_head_groups.split(";"):
-            grp = [int(x.strip()) for x in chunk.split(",") if x.strip()]
-            groups.append(grp)
-    elif strategy == "contiguous":
-        groups = []
-        for i in range(0, len(selected_heads), group_size):
-            grp = selected_heads[i:i + group_size]
-            if len(grp) == group_size:
-                groups.append(grp)
-    else:
-        raise ValueError(f"Unknown head_group_strategy={strategy}")
-
-    if max_head_groups > 0:
-        groups = groups[:max_head_groups]
-    return groups
-
-
-def head_slice(head_idx: int, head_dim: int) -> slice:
-    return slice(head_idx * head_dim, (head_idx + 1) * head_dim)
-
-@torch.no_grad()
-def mean_next_token_nll(
-    logits: torch.Tensor, 
-    input_ids: torch.Tensor, 
-    positions: List[int]
-) -> torch.Tensor:
-    if len(positions) == 0:
-        raise ValueError("positions must be non-empty")
-    
-    device = logits.device
-    pos_t = torch.tensor(positions, device=device, dtype=torch.long)
-    target_t = pos_t + 1
-
-    log_probs = F.log_softmax(logits[:, pos_t, :], dim=-1)
-    targets = input_ids[:, target_t]    
-    nll = -log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    return nll.mean(dim=-1)
-
-
 @torch.no_grad()
 def apply_sequence_assignment(
     zcat_teacher: torch.Tensor,
@@ -514,35 +309,27 @@ def run_oracle_eval(cfg: SequenceOracleConfig):
     
     print("[setup] loading and packing text...")
 
-    chunks = load_and_pack_texts(cfg, tokenizer).to(cfg.device)
+    chunks = load_and_pack_texts(cfg, tokenizer, text_field=cfg.text_field).to(cfg.device)
     block_tensors = run_to_block_and_cache_tensors(model, chunks, cfg)
 
     n_heads = block_tensors["q"].shape[1]
     head_dim = block_tensors["q"].shape[-1]
 
-    if cfg.head_indices == "all":
-        selected_heads = list(range(n_heads))
-    else:
-        selected_heads = [int(x.strip()) for x in cfg.head_indices.split(",") if x.strip()]
-        
-    for h in selected_heads:
-        if h < 0 or h >= n_heads:
-            raise ValueError(f"Head index {h} out of range [0, {n_heads-1}]")
-    
+    selected_heads = parse_head_indices(cfg.head_indices, n_heads)
     head_groups = build_head_groups(
         selected_heads=selected_heads,
         group_size=cfg.head_group_size,
         strategy=cfg.head_group_strategy,
         manual_head_groups=cfg.manual_head_groups,
         max_head_groups=cfg.max_head_groups,
+        seed=cfg.seed,
     )
 
-    if cfg.replace_mode == "multi_head_single_pos_shared":
-        assignments =  [(learner,) * cfg.head_group_size for learner in BASE_LEARNERS]
-    elif cfg.replace_mode == "multi_head_single_pos_per_head":
-        assignments =  list(itertools.product(BASE_LEARNERS, repeat=cfg.head_group_size))
-    else:
-        raise ValueError(f"Unsupported replace_mode={cfg.replace_mode}")
+    assignments = build_candidate_assignments(
+        replace_mode=cfg.replace_mode,
+        learner_names=BASE_LEARNERS,
+        group_size=cfg.head_group_size,
+    )
     
     print(f"[setup] total chunks={chunks.shape[0]}, layer={cfg.layer_idx}, mode={cfg.replace_mode}")
     print(f"[setup] selected heads={selected_heads}")
@@ -611,9 +398,6 @@ def run_oracle_eval(cfg: SequenceOracleConfig):
 
 
 
-def candidate_name(assign: Sequence[str]) -> str:
-    return "+".join(assign)
-
 def summarize(results: Dict[str, torch.Tensor]):
     assignments = results["assignments"]
     units = results["groups"]
@@ -678,9 +462,10 @@ def main():
                         choices=["contiguous", "manual"])
     parser.add_argument("--manual_head_groups", type=str, default="")
     parser.add_argument("--max_head_groups", type=int, default=0)
+    args = parser.parse_args()
 
 
-    cfg = SequenceOracleConfig()
+    cfg = SequenceOracleConfig(**vars(args))
     print("[config]")
     for k, v in vars(cfg).items():
         print(f"  {k}: {v}")

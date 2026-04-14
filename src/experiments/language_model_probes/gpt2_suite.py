@@ -2,49 +2,36 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import math
 import random
 from dataclasses import dataclass, asdict
-from itertools import product
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import torch
-import torch.nn.functional as F
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from experiments.attention_learners import build_learners
+from experiments.language_model_probes.gpt2_probe_utils import (
+    add_shared_cli_args,
+    build_candidate_assignments,
+    build_head_groups,
+    candidate_name,
+    continue_from_modified_block_gpt2,
+    extract_head_qkv_and_teacher_outputs_gpt2,
+    head_slice,
+    load_and_pack_texts,
+    mean_next_token_nll,
+    parse_head_indices,
+    run_to_block_and_cache_tensors,
+)
+from experiments.language_model_probes.probe_utils import LearnerRegistry, short_hash
 
 
-LEARNERS = ["soft", "sharp", "window_soft", "weighted_linear"]
-LEARNER_IMPLS = build_learners(LEARNERS)
-
-
-# ============================================================
-# Config
-# ============================================================
-
-@dataclass
-class EvalConfig:
-    L: int
-    d: int
-    dv: int
-    batch_size: int
-    sigma: float
-    device: str
-    beta_soft: float
-    k_sharp: int
-    k_linear_local: int
-    ridge_lambda: float
-    min_context: int
-    window_size: int
-
+BASE_LEARNERS = ["soft", "sharp", "window_soft", "weighted_linear"]
+LEARNER_REGISTRY = LearnerRegistry(BASE_LEARNERS)
 
 @dataclass
-class BenchConfig:
+class SuiteConfig:
     # model/data
     model_name: str = "openai-community/gpt2"
     dataset_name: str = "wikitext"
@@ -98,11 +85,6 @@ class BenchConfig:
     save_results: bool = True
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-# ============================================================
-# Utilities
-# ============================================================
-
 def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -110,385 +92,29 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def first_tensor(x):
-    if isinstance(x, tuple):
-        return x[0]
-    return x
-
-
-def short_hash(s: str) -> str:
-    return hashlib.md5(s.encode()).hexdigest()[:10]
-
-
-def cache_stem(cfg: BenchConfig) -> str:
+def result_stem(cfg: SuiteConfig) -> str:
     key = json.dumps(asdict(cfg), sort_keys=True)
     return short_hash(key)
 
-
-def result_stem(cfg: BenchConfig) -> str:
-    key = json.dumps(asdict(cfg), sort_keys=True)
-    return short_hash(key)
-
-
-def parse_head_indices(head_indices: str, n_heads: int) -> List[int]:
-    if head_indices == "all":
-        return list(range(n_heads))
-
-    out = [int(x.strip()) for x in head_indices.split(",") if x.strip()]
-    if not out:
-        raise ValueError("Parsed empty head index list.")
-
-    for h in out:
-        if h < 0 or h >= n_heads:
-            raise ValueError(f"Head index {h} out of range [0, {n_heads - 1}]")
-    return out
-
-
-def parse_manual_head_groups(s: str) -> List[List[int]]:
-    groups = []
-    s = s.strip()
-    if not s:
-        return groups
-    for grp in s.split(";"):
-        g = [int(x.strip()) for x in grp.split(",") if x.strip()]
-        if not g:
-            continue
-        groups.append(g)
-    return groups
-
-
-def build_eval_cfg(cfg: BenchConfig, head_dim: int) -> EvalConfig:
-    return EvalConfig(
-        L=cfg.block_size,
-        d=head_dim,
-        dv=head_dim,
-        batch_size=1,
-        sigma=0.0,
-        device=cfg.device,
-        beta_soft=cfg.beta_soft,
-        k_sharp=cfg.k_sharp,
-        k_linear_local=cfg.k_linear_local,
-        ridge_lambda=cfg.ridge_lambda,
-        min_context=cfg.min_context,
-        window_size=cfg.window_size,
-    )
-
-
-def split_heads(x: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
-    # x: (B, L, D)
-    B, L, D = x.shape
-    assert D == num_heads * head_dim
-    return x.view(B, L, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
-
-
-def merge_heads(x: torch.Tensor) -> torch.Tensor:
-    # x: (B, H, L, Dh)
-    B, H, L, Dh = x.shape
-    return x.permute(0, 2, 1, 3).contiguous().view(B, L, H * Dh)
-
-
-def causal_soft_attention_from_qkv(
-    q: torch.Tensor,  # (B,H,L,Dh)
-    k: torch.Tensor,  # (B,H,L,Dh)
-    v: torch.Tensor,  # (B,H,L,Dh)
-) -> torch.Tensor:
-    _, _, L, Dh = q.shape
-    scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(Dh)
-    causal = torch.triu(
-        torch.ones(L, L, device=q.device, dtype=torch.bool),
-        diagonal=1,
-    )
-    scores = scores.masked_fill(causal[None, None, :, :], float("-inf"))
-    attn = torch.softmax(scores, dim=-1)
-    z = torch.matmul(attn, v)
-    return z
-
-
-# ============================================================
-# Head group construction
-# ============================================================
-
-def generate_head_groups(
-    head_indices: List[int],
-    group_size: int,
-    strategy: str,
-    manual_head_groups: str,
-    max_head_groups: int,
-    seed: int,
-) -> List[List[int]]:
-    if strategy == "manual":
-        groups = parse_manual_head_groups(manual_head_groups)
-        if not groups:
-            raise ValueError("head_group_strategy=manual but no manual_head_groups were provided.")
-        for g in groups:
-            for h in g:
-                if h not in head_indices:
-                    raise ValueError(f"Manual group head {h} not in selected head_indices={head_indices}")
-        return groups
-
-    if group_size <= 0:
-        raise ValueError("head_group_size must be positive.")
-
-    if group_size > len(head_indices):
-        raise ValueError(
-            f"head_group_size={group_size} > number of selected heads={len(head_indices)}"
-        )
-
-    if strategy == "contiguous":
-        groups = []
-        for i in range(0, len(head_indices), group_size):
-            g = head_indices[i:i + group_size]
-            if len(g) == group_size:
-                groups.append(g)
-    elif strategy == "random":
-        rng = random.Random(seed)
-        shuffled = head_indices[:]
-        rng.shuffle(shuffled)
-        groups = []
-        for i in range(0, len(shuffled), group_size):
-            g = shuffled[i:i + group_size]
-            if len(g) == group_size:
-                groups.append(sorted(g))
-    else:
-        raise ValueError(f"Unknown head_group_strategy={strategy}")
-
-    if max_head_groups > 0:
-        groups = groups[:max_head_groups]
-
-    if not groups:
-        raise ValueError("No head groups were generated.")
-
-    return groups
-
-
-# ============================================================
-# Data loading / packing
-# ============================================================
-
-def load_and_pack_texts(cfg: BenchConfig, tokenizer) -> torch.Tensor:
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    stem_key = (
-        f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.split}|"
-        f"text={cfg.text_field}|max_texts={cfg.max_texts}|block={cfg.block_size}|"
-        f"max_chunks={cfg.max_chunks}"
-    )
-    cache_path = cache_dir / f"{short_hash(stem_key)}__chunks.pt"
-
-    if cache_path.exists():
-        print(f"[cache] loading chunks from {cache_path}")
-        return torch.load(cache_path)
-
-    print("[data] loading dataset...")
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split)
-
-    token_blocks = []
-    total_texts = 0
-
-    print("[data] tokenizing and packing texts...")
-    for ex in ds:
-        text = ex[cfg.text_field]
-        if not isinstance(text, str) or not text.strip():
-            continue
-
-        ids = tokenizer(
-            text,
-            return_tensors="pt",
-            add_special_tokens=False,
-        )["input_ids"][0]
-
-        if ids.numel() < cfg.block_size:
-            continue
-
-        n_blocks = ids.numel() // cfg.block_size
-        ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
-        token_blocks.append(ids)
-
-        total_texts += 1
-        if total_texts >= cfg.max_texts:
-            break
-
-    if not token_blocks:
-        raise ValueError("No usable token blocks found.")
-
-    chunks = torch.cat(token_blocks, dim=0)[: cfg.max_chunks]
-    print(f"[data] packed {chunks.shape[0]} chunks from {total_texts} texts")
-
-    torch.save(chunks.cpu(), cache_path)
-    return chunks
-
-
-# ============================================================
-# GPT-2 block extraction helpers
-# ============================================================
-
-@torch.no_grad()
-def get_input_embeddings_gpt2(model, input_ids: torch.Tensor) -> torch.Tensor:
-    device = input_ids.device
-    _, seqlen = input_ids.shape
-
-    transformer = model.transformer
-    pos_ids = torch.arange(seqlen, device=device).unsqueeze(0)
-    tok_emb = transformer.wte(input_ids)
-    pos_emb = transformer.wpe(pos_ids)
-    hidden_states = tok_emb + pos_emb
-    hidden_states = transformer.drop(hidden_states)
-    return hidden_states
-
-
-@torch.no_grad()
-def run_to_block_input_gpt2(model, input_ids: torch.Tensor, layer_idx: int) -> torch.Tensor:
-    x = get_input_embeddings_gpt2(model, input_ids)
-    blocks = model.transformer.h
-
-    if layer_idx < 0 or layer_idx >= len(blocks):
-        raise ValueError(f"layer_idx={layer_idx} invalid for {len(blocks)} blocks")
-
-    for l in range(layer_idx):
-        x = first_tensor(blocks[l](x, use_cache=False))
-    return x
-
-
-@torch.no_grad()
-def extract_head_qkv_and_teacher_outputs_gpt2(model, x_in: torch.Tensor, layer_idx: int):
-    block = model.transformer.h[layer_idx]
-    attn_module = block.attn
-
-    h_ln1 = block.ln_1(x_in)
-    qkv = attn_module.c_attn(h_ln1)
-
-    split_size = attn_module.split_size
-    q_raw, k_raw, v_raw = qkv.split(split_size, dim=2)
-
-    num_heads = attn_module.num_heads
-    head_dim = attn_module.head_dim
-
-    q = split_heads(q_raw, num_heads, head_dim)
-    k = split_heads(k_raw, num_heads, head_dim)
-    v = split_heads(v_raw, num_heads, head_dim)
-
-    z_teacher = causal_soft_attention_from_qkv(q, k, v)
-    zcat_teacher = merge_heads(z_teacher)
-
-    return h_ln1, q, k, v, z_teacher, zcat_teacher, block, attn_module
-
-
-@torch.no_grad()
-def cache_block_tensors(model, chunks: torch.Tensor, cfg: BenchConfig) -> Dict[str, torch.Tensor]:
-    cache_dir = Path(cfg.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    stem_key = (
-        f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.split}|"
-        f"block={cfg.block_size}|max_chunks={cfg.max_chunks}|"
-        f"layer={cfg.layer_idx}|device_independent=true"
-    )
-    cache_path = cache_dir / f"{short_hash(stem_key)}__layer{cfg.layer_idx}__block_tensors.pt"
-
-    if cache_path.exists():
-        print(f"[cache] loading block tensors from {cache_path}")
-        return torch.load(cache_path)
-
-    print("[cache-build] extracting block tensors...")
-    n_chunks = chunks.shape[0]
-    n_batches = math.ceil(n_chunks / cfg.batch_size)
-
-    x_in_all = []
-    q_all = []
-    k_all = []
-    v_all = []
-    z_teacher_all = []
-    zcat_teacher_all = []
-
-    for batch_idx, start in enumerate(range(0, n_chunks, cfg.batch_size)):
-        batch_ids = list(range(start, min(start + cfg.batch_size, n_chunks)))
-        batch_input_ids = chunks[batch_ids].to(cfg.device)
-
-        x_in = run_to_block_input_gpt2(model, batch_input_ids, cfg.layer_idx)
-        _, q, k, v, z_teacher, zcat_teacher, _, _ = extract_head_qkv_and_teacher_outputs_gpt2(
-            model, x_in, cfg.layer_idx
-        )
-
-        x_in_all.append(x_in.cpu())
-        q_all.append(q.cpu())
-        k_all.append(k.cpu())
-        v_all.append(v.cpu())
-        z_teacher_all.append(z_teacher.cpu())
-        zcat_teacher_all.append(zcat_teacher.cpu())
-
-        if batch_idx % 5 == 0 or batch_idx == n_batches - 1:
-            print(f"[cache-build] batch {batch_idx + 1}/{n_batches} chunks {batch_ids[0]}..{batch_ids[-1]}")
-
-    out = {
-        "x_in": torch.cat(x_in_all, dim=0),
-        "q": torch.cat(q_all, dim=0),
-        "k": torch.cat(k_all, dim=0),
-        "v": torch.cat(v_all, dim=0),
-        "z_teacher": torch.cat(z_teacher_all, dim=0),
-        "zcat_teacher": torch.cat(zcat_teacher_all, dim=0),
-    }
-    torch.save(out, cache_path)
-    print(f"[cache] saved block tensors to {cache_path}")
-    return out
-
-
-# ============================================================
-# Continue model after intervention
-# ============================================================
-
-@torch.no_grad()
-def continue_from_modified_block_gpt2(
-    model,
-    block,
-    x_in: torch.Tensor,
-    zcat_mod: torch.Tensor,
-    layer_idx: int,
-) -> torch.Tensor:
-    attn_out = block.attn.c_proj(zcat_mod)
-    attn_out = block.attn.resid_dropout(attn_out)
-
-    x = x_in + attn_out
-    residual = x
-    x_ln2 = block.ln_2(x)
-    mlp_out = block.mlp(x_ln2)
-    x = residual + mlp_out
-
-    for l in range(layer_idx + 1, len(model.transformer.h)):
-        x = first_tensor(model.transformer.h[l](x, use_cache=False))
-
-    x = model.transformer.ln_f(x)
-    logits = model.lm_head(x)
-    return logits
-
-
-# ============================================================
-# Learner prediction helpers
-# ============================================================
 
 @torch.no_grad()
 def predict_head_output_for_all_learners(
-    q: torch.Tensor,  # (1,H,L,Dh)
-    k: torch.Tensor,  # (1,H,L,Dh)
-    v: torch.Tensor,  # (1,H,L,Dh)
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
     head_idx: int,
     pos: int,
-    eval_cfg: EvalConfig,
+    cfg: SuiteConfig,
 ) -> Dict[str, torch.Tensor]:
-    q_t = q[:, head_idx, pos, :]         # (1,Dh)
-    Kctx = k[:, head_idx, :pos + 1, :]   # (1,T,Dh)
-    Vctx = v[:, head_idx, :pos + 1, :]   # (1,T,Dh)
+    q_t = q[:, head_idx, pos, :]
+    Kctx = k[:, head_idx, :pos + 1, :] 
+    Vctx = v[:, head_idx, :pos + 1, :]
 
     out = {}
-    for learner in LEARNERS:
-        pred = LEARNER_IMPLS[learner](q_t, Kctx, Vctx, eval_cfg)  # (1,Dh)
-        out[learner] = pred[0]
+    for learner in BASE_LEARNERS:
+        pred = LEARNER_REGISTRY.predict(learner, q_t, Kctx, Vctx, cfg)[0]
+        out[learner] = pred
     return out
-
-
-# ============================================================
-# Intervention evaluation
-# ============================================================
 
 @torch.no_grad()
 def evaluate_single_head_single_pos(
@@ -504,22 +130,18 @@ def evaluate_single_head_single_pos(
     layer_idx: int,
     head_idx: int,
     pos: int,
-    cfg: BenchConfig,
+    cfg: SuiteConfig,
 ) -> Dict[str, float]:
     head_dim = attn_module.head_dim
-    eval_cfg = build_eval_cfg(cfg, head_dim)
+    pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, cfg)
 
-    pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, eval_cfg)
-
-    M = len(LEARNERS)
+    M = len(BASE_LEARNERS)
     x_rep = x_in.repeat(M, 1, 1)
     zcat_rep = zcat_teacher.repeat(M, 1, 1)
 
-    start = head_idx * head_dim
-    end = (head_idx + 1) * head_dim
-
-    for m, learner in enumerate(LEARNERS):
-        zcat_rep[m, pos, start:end] = pred_map[learner]
+    head_slice_idx = head_slice(head_idx, head_dim)
+    for m, learner in enumerate(BASE_LEARNERS):
+        zcat_rep[m, pos, head_slice_idx] = pred_map[learner]
 
     logits = continue_from_modified_block_gpt2(
         model=model,
@@ -529,11 +151,8 @@ def evaluate_single_head_single_pos(
         layer_idx=layer_idx,
     )
 
-    target_next = input_ids[0, pos + 1].repeat(M)
-    log_probs = F.log_softmax(logits[:, pos, :], dim=-1)
-    nll = -log_probs[torch.arange(M, device=logits.device), target_next]
-
-    return {learner: nll[m].item() for m, learner in enumerate(LEARNERS)}
+    losses = mean_next_token_nll(logits, input_ids.repeat(M, 1), [pos])
+    return {learner: float(losses[m].item()) for m, learner in enumerate(BASE_LEARNERS)}
 
 
 @torch.no_grad()
@@ -550,26 +169,22 @@ def evaluate_multi_head_single_pos_shared(
     layer_idx: int,
     head_group: Sequence[int],
     pos: int,
-    cfg: BenchConfig,
+    cfg: SuiteConfig,
 ) -> Dict[str, float]:
     head_dim = attn_module.head_dim
-    eval_cfg = build_eval_cfg(cfg, head_dim)
-
     pred_cache: Dict[Tuple[int, str], torch.Tensor] = {}
     for head_idx in head_group:
-        pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, eval_cfg)
+        pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, cfg)
         for learner, pred in pred_map.items():
             pred_cache[(head_idx, learner)] = pred
 
-    M = len(LEARNERS)
+    M = len(BASE_LEARNERS)
     x_rep = x_in.repeat(M, 1, 1)
     zcat_rep = zcat_teacher.repeat(M, 1, 1)
 
-    for m, learner in enumerate(LEARNERS):
+    for m, learner in enumerate(BASE_LEARNERS):
         for head_idx in head_group:
-            start = head_idx * head_dim
-            end = (head_idx + 1) * head_dim
-            zcat_rep[m, pos, start:end] = pred_cache[(head_idx, learner)]
+            zcat_rep[m, pos, head_slice(head_idx, head_dim)] = pred_cache[(head_idx, learner)]
 
     logits = continue_from_modified_block_gpt2(
         model=model,
@@ -579,11 +194,8 @@ def evaluate_multi_head_single_pos_shared(
         layer_idx=layer_idx,
     )
 
-    target_next = input_ids[0, pos + 1].repeat(M)
-    log_probs = F.log_softmax(logits[:, pos, :], dim=-1)
-    nll = -log_probs[torch.arange(M, device=logits.device), target_next]
-
-    return {learner: nll[m].item() for m, learner in enumerate(LEARNERS)}
+    losses = mean_next_token_nll(logits, input_ids.repeat(M, 1), [pos])
+    return {learner: float(losses[m].item()) for m, learner in enumerate(BASE_LEARNERS)}
 
 
 @torch.no_grad()
@@ -600,19 +212,17 @@ def evaluate_multi_head_single_pos_per_head(
     layer_idx: int,
     head_group: Sequence[int],
     pos: int,
-    cfg: BenchConfig,
+    cfg: SuiteConfig,
+    assignments: Sequence[Tuple[str, ...]],
+    assignment_names: Sequence[str],
 ) -> Dict[str, float]:
     head_dim = attn_module.head_dim
-    eval_cfg = build_eval_cfg(cfg, head_dim)
 
     pred_cache: Dict[Tuple[int, str], torch.Tensor] = {}
     for head_idx in head_group:
-        pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, eval_cfg)
+        pred_map = predict_head_output_for_all_learners(q, k, v, head_idx, pos, cfg)
         for learner, pred in pred_map.items():
             pred_cache[(head_idx, learner)] = pred
-
-    assignments = list(product(LEARNERS, repeat=len(head_group)))
-    assignment_names = ["+".join(a) for a in assignments]
 
     M = len(assignments)
     x_rep = x_in.repeat(M, 1, 1)
@@ -620,9 +230,7 @@ def evaluate_multi_head_single_pos_per_head(
 
     for m, assignment in enumerate(assignments):
         for head_idx, learner in zip(head_group, assignment):
-            start = head_idx * head_dim
-            end = (head_idx + 1) * head_dim
-            zcat_rep[m, pos, start:end] = pred_cache[(head_idx, learner)]
+            zcat_rep[m, pos, head_slice(head_idx, head_dim)] = pred_cache[(head_idx, learner)]
 
     logits = continue_from_modified_block_gpt2(
         model=model,
@@ -632,11 +240,8 @@ def evaluate_multi_head_single_pos_per_head(
         layer_idx=layer_idx,
     )
 
-    target_next = input_ids[0, pos + 1].repeat(M)
-    log_probs = F.log_softmax(logits[:, pos, :], dim=-1)
-    nll = -log_probs[torch.arange(M, device=logits.device), target_next]
-
-    return {assignment_names[m]: nll[m].item() for m in range(M)}
+    losses = mean_next_token_nll(logits, input_ids.repeat(M, 1), [pos])
+    return {assignment_names[m]: float(losses[m].item()) for m in range(M)}
 
 
 # ============================================================
@@ -644,7 +249,7 @@ def evaluate_multi_head_single_pos_per_head(
 # ============================================================
 
 @torch.no_grad()
-def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
+def run_benchmark(cfg: SuiteConfig) -> Dict[str, object]:
     print("[setup] loading tokenizer/model...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
@@ -659,8 +264,8 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
         raise ValueError("This script currently supports GPT-2 style models only.")
 
     print("[setup] loading and packing text...")
-    chunks = load_and_pack_texts(cfg, tokenizer).to(cfg.device)
-    cached = cache_block_tensors(model, chunks, cfg)
+    chunks = load_and_pack_texts(cfg, tokenizer, text_field=cfg.text_field).to(cfg.device)
+    cached = run_to_block_and_cache_tensors(model, chunks, cfg)
 
     n_heads = cached["q"].shape[1]
     head_indices = parse_head_indices(cfg.head_indices, n_heads)
@@ -674,8 +279,8 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
     if mode == "single_head_single_pos":
         intervention_units = [[h] for h in head_indices]
     elif mode in ("multi_head_single_pos_shared", "multi_head_single_pos_per_head"):
-        intervention_units = generate_head_groups(
-            head_indices=head_indices,
+        intervention_units = build_head_groups(
+            selected_heads=head_indices,
             group_size=cfg.head_group_size,
             strategy=cfg.head_group_strategy,
             manual_head_groups=cfg.manual_head_groups,
@@ -684,6 +289,22 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
         )
     else:
         raise ValueError(f"Unknown replace_mode={mode}")
+
+    if not intervention_units:
+        raise ValueError("No intervention units generated")
+
+    if mode == "multi_head_single_pos_per_head":
+        per_head_assignments = build_candidate_assignments(
+            replace_mode=mode,
+            learner_names=BASE_LEARNERS,
+            group_size=cfg.head_group_size,
+        )
+        per_head_assignment_names = [candidate_name(a) for a in per_head_assignments]
+        candidate_names = per_head_assignment_names
+    else:
+        per_head_assignments = None
+        per_head_assignment_names = None
+        candidate_names = BASE_LEARNERS
 
     print(f"[setup] total chunks={chunks.shape[0]}, layer={cfg.layer_idx}, mode={mode}")
     print(f"[setup] selected heads={head_indices}")
@@ -724,7 +345,6 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
                         pos=pos,
                         cfg=cfg,
                     )
-                    candidate_names = LEARNERS
                     unit_label = f"head={unit[0]}"
                 elif mode == "multi_head_single_pos_shared":
                     losses_dict = evaluate_multi_head_single_pos_shared(
@@ -742,9 +362,10 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
                         pos=pos,
                         cfg=cfg,
                     )
-                    candidate_names = LEARNERS
                     unit_label = f"group={','.join(map(str, unit))}"
                 elif mode == "multi_head_single_pos_per_head":
+                    if per_head_assignments is None or per_head_assignment_names is None:
+                        raise RuntimeError("per-head assignments were not initialized")
                     losses_dict = evaluate_multi_head_single_pos_per_head(
                         model=model,
                         input_ids=input_ids_1,
@@ -759,8 +380,9 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
                         head_group=unit,
                         pos=pos,
                         cfg=cfg,
+                        assignments=per_head_assignments,
+                        assignment_names=per_head_assignment_names,
                     )
-                    candidate_names = list(losses_dict.keys())
                     unit_label = f"group={','.join(map(str, unit))}"
                 else:
                     raise RuntimeError("Unreachable mode branch.")
@@ -786,10 +408,6 @@ def run_benchmark(cfg: BenchConfig) -> Dict[str, object]:
         "candidate_names": candidate_names,
     }
 
-
-# ============================================================
-# Summaries
-# ============================================================
 
 def summarize(results: Dict[str, object]) -> None:
     losses: torch.Tensor = results["losses"]
@@ -849,7 +467,7 @@ def summarize(results: Dict[str, object]) -> None:
         print(f"  pos={pos:>3}  {stats_str}")
 
 
-def save_results(results: Dict[str, object], cfg: BenchConfig) -> None:
+def save_results(results: Dict[str, object], cfg: SuiteConfig) -> None:
     if not cfg.save_results:
         return
 
@@ -862,9 +480,7 @@ def save_results(results: Dict[str, object], cfg: BenchConfig) -> None:
     print(f"\n[save] saved results to {path}")
 
 
-# ============================================================
-# CLI
-# ============================================================
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
@@ -930,7 +546,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    cfg = BenchConfig(**vars(args))
+    cfg = SuiteConfig(**vars(args))
     set_seed(cfg.seed)
 
     print("[config]")
@@ -938,19 +554,12 @@ def main():
         print(f"  {k}: {v}")
 
     if cfg.replace_mode == "multi_head_single_pos_per_head":
-        n_assignments = len(LEARNERS) ** cfg.head_group_size
+        n_assignments = len(BASE_LEARNERS) ** cfg.head_group_size
         print(f"[note] per-head mode will evaluate {n_assignments} assignments per example")
 
     results = run_benchmark(cfg)
     summarize(results)
     save_results(results, cfg)
-
-    print("\n=== Interpretation guide ===")
-    print("1) If oracle beats best_fixed by a nontrivial margin, there is headroom for adaptive selection.")
-    print("2) In multi_head_single_pos_shared, the oracle asks whether one learner suits a whole head-group at a token.")
-    print("3) In multi_head_single_pos_per_head, the oracle asks whether different heads in the same group want different learners.")
-    print("4) If per-head oracle beats shared oracle by a lot, that is stronger evidence for intra-token heterogeneity across heads.")
-
 
 if __name__ == "__main__":
     main()
