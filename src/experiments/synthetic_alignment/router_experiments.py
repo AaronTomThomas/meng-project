@@ -6,7 +6,7 @@ import torch
 
 from experiments.synthetic_alignment.config import RouterExperimentConfig
 from experiments.synthetic_alignment.router_dataset import RouterDatasetBuilder
-from experiments.experiment_routers import (
+from experiments.synthetic_alignment.experiment_routers import (
     evaluate_logistic_router,
     evaluate_loss_router,
     train_logistic_router,
