@@ -43,6 +43,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
 ## GPT-2 AKAZA/FreeZ
 
 ```bash
+
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-akaza \
   --device cuda \
   --layer_indices 6,7,8,9,10,11 \
@@ -55,8 +56,8 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --max_val_chunks 512 \
   --max_test_chunks 512 \
   --epochs 500 \
-  --patience 30 \
-  --bottleneck_dim 4 \
+  --patience 3 \
+  --bottleneck_dim 32 \
   --adapter_dropout 0.05 \
   --output_scale 1.0 \
   --output_path outputs/attention_adapter/gpt2_akaza.pt
@@ -101,7 +102,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --max_val_chunks 128 \
   --max_test_chunks 128 \
   --epochs 80 \
-  --patience 8 \
+  --patience 3 \
   --bottleneck_dim 1 \
   --adapter_dropout 0.05 \
   --output_scale 1.0 \
@@ -123,7 +124,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --max_val_chunks 128 \
   --max_test_chunks 128 \
   --epochs 80 \
-  --patience 8 \
+  --patience 3 \
   --peft_target_profile attn_dense \
   --lora_rank 4 \
   --lora_alpha 2 \

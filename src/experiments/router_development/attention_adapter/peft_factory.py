@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from experiments.router_development.attention_adapter.adapters.reft_adapters import ResidualReFTAdapter
 import torch.nn as nn
 
-from experiments.router_development.attention_adapter.adapters import (
+from experiments.router_development.attention_adapter.adapters.adapters import (
     GPT2AKAZAAdapter,
     OfficialPEFTAdapter,
     PythiaAKAZAAdapter,
 )
-from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig, AdapterMethod
+from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig, AdapterMethod, REFT_METHODS
 from experiments.router_development.attention_adapter.models import (
     DEFAULT_FAMILY_SPECS,
     ModelFamilyDefaults,
@@ -38,6 +39,8 @@ def build_wrapped_model(
         raise ValueError(f"AKAZA is not implemented for model_family={cfg.model_family!r}")
     if cfg.method in {AdapterMethod.LORA}:
         return build_official_peft_model(model=model, cfg=cfg, defaults=defaults, layer_indices=layer_indices)
+    if cfg.method in REFT_METHODS:
+        return ResidualReFTAdapter(model=model, cfg=cfg, layer_indices=layer_indices)
     choices = [method.value for method in METHODS]
     raise ValueError(f"Unknown method={cfg.method!r}; choices={choices}")
 

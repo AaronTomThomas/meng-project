@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import math
-from typing import Dict, List, Sequence
+from typing import Dict, Sequence
 
+from experiments.router_development.attention_adapter.adapters.utils import delta_stats
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig
-from experiments.router_development.attention_adapter.utils import (
-    block_forward_hidden,
-    split_heads,
-)
 
 
 class AdapterModel(nn.Module, ABC):
@@ -85,6 +81,8 @@ class GPT2AKAZAAdapter(AdapterModel):
         )
         for p in self.adapters.parameters():
             p.requires_grad_(True)
+        self._adapter_inputs: Dict[int, torch.Tensor] = {}
+        self._latest_deltas: Dict[int, torch.Tensor] = {}
 
     @property
     def device(self) -> torch.device:
@@ -107,85 +105,55 @@ class GPT2AKAZAAdapter(AdapterModel):
         adapter_input = self.adapter_input_for_block(block=block, hidden_states=hidden_states)
         return self.adapters[str(layer_idx)](adapter_input)
 
-    def attention_parts(self, *, block: nn.Module, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        attn = block.attn
-        residual = hidden_states
-        x_ln1 = block.ln_1(hidden_states)
-        qkv = attn.c_attn(x_ln1)
-        q_raw, k_raw, v_raw = qkv.split(attn.split_size, dim=2)
-        q = split_heads(q_raw, attn.num_heads).float()
-        k = split_heads(k_raw, attn.num_heads).float()
-        v = split_heads(v_raw, attn.num_heads).float()
+    def _make_block_pre_hook(self, layer_idx: int):
+        def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+            self._adapter_inputs[layer_idx] = inputs[0]
 
-        # Recompute causal attention z = softmax(QK^T / sqrt(d), causal) V in
-        # pre-c_proj space, then merge heads back to [batch, seq, hidden].
-        seq_len = q.shape[-2]
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(float(q.shape[-1]))
-        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=q.device))
-        scores = scores.masked_fill(~mask.view(1, 1, seq_len, seq_len), torch.finfo(scores.dtype).min)
-        z_heads = torch.matmul(torch.softmax(scores, dim=-1), v).float()
-    
-        bsz, num_heads, _, head_dim = z_heads.shape
-        z_soft = z_heads.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, num_heads * head_dim).to(x_ln1.dtype)
+        return hook
 
-        return residual, z_soft
+    def _make_c_proj_pre_hook(self, layer_idx: int):
+        def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+            if layer_idx not in self._adapter_inputs:
+                raise RuntimeError(
+                    f"Missing cached GPT-2 block input for layer {layer_idx}. "
+                    "The block pre-hook did not fire before attn.c_proj."
+                )
+            z = inputs[0]
+            block = self.model.transformer.h[layer_idx]
+            delta = self.compute_delta(
+                layer_idx=layer_idx,
+                block=block,
+                hidden_states=self._adapter_inputs[layer_idx],
+            ).to(dtype=z.dtype, device=z.device)
+            self._latest_deltas[layer_idx] = delta.detach()
+            # GPT-2 c_proj receives the merged pre-output-projection attention value z.
+            return (z + delta,) + inputs[1:]
 
-    def forward_edited_block(self, hidden_states: torch.Tensor, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        block = self.model.transformer.h[layer_idx]
-        residual, z_soft = self.attention_parts(block=block, hidden_states=hidden_states)
-
-        delta = self.compute_delta(layer_idx=layer_idx, block=block, hidden_states=hidden_states)
-        attn = block.attn
-
-        # AKAZA edits the attention value before c_proj: h' = h + c_proj(z + Delta(x)).
-        hidden_states = residual + attn.resid_dropout(attn.c_proj(z_soft + delta.to(z_soft.dtype)))
-        residual = hidden_states
-        hidden_states = residual + block.mlp(block.ln_2(hidden_states))
-        return hidden_states, delta
+        return hook
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        transformer = self.model.transformer
         input_ids = input_ids.to(self.device)
-        bsz, seq_len = input_ids.shape
-        position_ids = torch.arange(0, seq_len, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)
-        first_edit = min(self.layer_indices)
-        with torch.no_grad():
-            hidden_states = transformer.wte(input_ids) + transformer.wpe(position_ids)
-            hidden_states = transformer.drop(hidden_states)
-            for i in range(first_edit):
-                hidden_states = block_forward_hidden(transformer.h[i], hidden_states)
-        for i in range(first_edit, len(transformer.h)):
-            if i in self.layer_set:
-                hidden_states, _ = self.forward_edited_block(hidden_states, i)
-            else:
-                hidden_states = block_forward_hidden(transformer.h[i], hidden_states)
-        return self.model.lm_head(transformer.ln_f(hidden_states))
-
+        self._adapter_inputs.clear()
+        self._latest_deltas.clear()
+        handles: list[torch.utils.hooks.RemovableHandle] = []
+        try:
+            for layer_idx in self.layer_indices:
+                block = self.model.transformer.h[layer_idx]
+                handles.append(block.register_forward_pre_hook(self._make_block_pre_hook(layer_idx)))
+                handles.append(block.attn.c_proj.register_forward_pre_hook(self._make_c_proj_pre_hook(layer_idx)))
+            return self.model(input_ids=input_ids, use_cache=False).logits
+        finally:
+            for handle in handles:
+                handle.remove()
+            self._adapter_inputs.clear()
 
     @torch.no_grad()
     def peft_stats(self, input_ids: torch.Tensor | None = None) -> Dict[str, float]:
         if input_ids is None:
             return {}
         self.set_peft_eval_mode()
-        transformer = self.model.transformer
-        input_ids = input_ids.to(self.device)
-        bsz, seq_len = input_ids.shape
-        position_ids = torch.arange(0, seq_len, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)
-        first_edit = min(self.layer_indices)
-        hidden_states = transformer.wte(input_ids) + transformer.wpe(position_ids)
-        hidden_states = transformer.drop(hidden_states)
-        for i in range(first_edit):
-            hidden_states = block_forward_hidden(transformer.h[i], hidden_states)
-        deltas: Dict[int, torch.Tensor] = {}
-        for i in range(first_edit, len(transformer.h)):
-            if i in self.layer_set:
-                hidden_states, delta = self.forward_edited_block(hidden_states, i)
-                deltas[i] = delta
-            else:
-                hidden_states = block_forward_hidden(transformer.h[i], hidden_states)
-        return delta_stats(deltas)
+        _ = self(input_ids)
+        return delta_stats(self._latest_deltas)
 
 
 
@@ -198,9 +166,8 @@ class PythiaAKAZAAdapter(AdapterModel):
         self.cfg = cfg
         self.layer_indices = sorted(int(x) for x in layer_indices)
         self.layer_set = set(self.layer_indices)
-        self._current_layer_idx: int | None = None
+        self._adapter_inputs: Dict[int, torch.Tensor] = {}
         self._latest_deltas: Dict[int, torch.Tensor] = {}
-        self._handles: list[torch.utils.hooks.RemovableHandle] = []
 
         for p in self.model.parameters():
             p.requires_grad_(False)
@@ -216,19 +183,14 @@ class PythiaAKAZAAdapter(AdapterModel):
                 for layer_idx in self.layer_indices
             }
         )
-        for layer_idx in self.layer_indices:
-            dense = self.model.gpt_neox.layers[layer_idx].attention.dense
-            self._handles.append(dense.register_forward_pre_hook(self._make_dense_pre_hook(layer_idx)))
-
 
     @property
     def device(self) -> torch.device:
         return next(self.adapters.parameters()).device
 
     def remove_hooks(self) -> None:
-        for handle in self._handles:
-            handle.remove()
-        self._handles.clear()
+        """Compatibility no-op: hooks are now scoped to each forward call."""
+        return None
 
     def set_peft_train_mode(self) -> None:
         self.model.eval()
@@ -241,9 +203,14 @@ class PythiaAKAZAAdapter(AdapterModel):
 
     def _make_dense_pre_hook(self, layer_idx: int):
         def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+            if layer_idx not in self._adapter_inputs:
+                raise RuntimeError(
+                    f"Missing cached Pythia layer input for layer {layer_idx}. "
+                    "The layer pre-hook did not fire before attention.dense."
+                )
             z = inputs[0]
             layer = self.model.gpt_neox.layers[layer_idx]
-            adapter_input = self._adapter_input_for_layer(layer)
+            adapter_input = self._adapter_input_for_layer(layer_idx=layer_idx, layer=layer)
             delta = self.adapters[str(layer_idx)](adapter_input).to(z.dtype)
             self._latest_deltas[layer_idx] = delta.detach()
             # Pythia exposes the same pre-output-projection attention value as
@@ -254,18 +221,18 @@ class PythiaAKAZAAdapter(AdapterModel):
     
 
     def _capture_layer_input(self, layer_idx: int, hidden_states: torch.Tensor) -> None:
-        self._current_layer_idx = layer_idx
-        self._current_hidden_states = hidden_states
+        self._adapter_inputs[layer_idx] = hidden_states
 
-    def _adapter_input_for_layer(self, layer: nn.Module) -> torch.Tensor:
-        hidden_states = self._current_hidden_states
+    def _adapter_input_for_layer(self, *, layer_idx: int, layer: nn.Module) -> torch.Tensor:
+        hidden_states = self._adapter_inputs[layer_idx]
         # Match the GPT-2 AKAZA conditioning: x = input_layernorm(h), detached.
         return layer.input_layernorm(hidden_states).detach()
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.to(self.device)
-        self._latest_deltas = {}
-        handles = []
+        self._adapter_inputs.clear()
+        self._latest_deltas.clear()
+        handles: list[torch.utils.hooks.RemovableHandle] = []
 
         def make_layer_pre_hook(layer_idx: int):
             def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
@@ -274,13 +241,15 @@ class PythiaAKAZAAdapter(AdapterModel):
             return hook
 
         for layer_idx in self.layer_indices:
-            handles.append(self.model.gpt_neox.layers[layer_idx].register_forward_pre_hook(make_layer_pre_hook(layer_idx)))
+            layer = self.model.gpt_neox.layers[layer_idx]
+            handles.append(layer.register_forward_pre_hook(make_layer_pre_hook(layer_idx)))
+            handles.append(layer.attention.dense.register_forward_pre_hook(self._make_dense_pre_hook(layer_idx)))
         try:
-            return self.model(input_ids).logits
+            return self.model(input_ids=input_ids, use_cache=False).logits
         finally:
             for handle in handles:
                 handle.remove()
-            self._current_layer_idx = None
+            self._adapter_inputs.clear()
 
     @torch.no_grad()
     def peft_stats(self, input_ids: torch.Tensor | None = None) -> Dict[str, float]:
@@ -327,12 +296,3 @@ class OfficialPEFTAdapter(AdapterModel):
             "peft_param_l2_rms": float(vec.pow(2).mean().sqrt().item()),
         }
 
-
-def delta_stats(deltas: Dict[int, torch.Tensor]) -> Dict[str, float]:
-    if not deltas:
-        return {}
-    flat = torch.cat([delta.detach().reshape(-1).float().cpu() for delta in deltas.values()])
-    return {
-        "delta_abs_mean": float(flat.abs().mean().item()),
-        "delta_l2_rms": float(flat.pow(2).mean().sqrt().item()),
-    }

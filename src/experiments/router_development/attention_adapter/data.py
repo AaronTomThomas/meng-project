@@ -28,12 +28,31 @@ def _official_split_names(cfg: AdapterFineTuneConfig) -> list[str]:
     return get_dataset_split_names(cfg.dataset_name, **kwargs)
 
 
+def _base_split_names(split_expr: str) -> list[str]:
+    """
+    Extract official split names from Hugging Face split expressions.
+
+    Examples:
+      train             -> ["train"]
+      train[:80%]       -> ["train"]
+      train[80%:90%]    -> ["train"]
+      train+validation  -> ["train", "validation"]
+    """
+    bases: list[str] = []
+    for part in split_expr.split("+"):
+        base = part.split("[", 1)[0].strip()
+        if base:
+            bases.append(base)
+    return bases or [split_expr]
+
+
 def validate_official_splits(cfg: AdapterFineTuneConfig) -> tuple[list[str], bool]:
     requested = {
         "train_split": cfg.train_split,
         "val_split": cfg.val_split,
         "test_split": cfg.test_split,
     }
+
     try:
         split_names = _official_split_names(cfg)
     except Exception as exc:
@@ -44,7 +63,13 @@ def validate_official_splits(cfg: AdapterFineTuneConfig) -> tuple[list[str], boo
         )
         return requested_splits, False
 
-    missing = {name: split for name, split in requested.items() if split not in split_names}
+    missing: dict[str, str] = {}
+    for name, split_expr in requested.items():
+        for base in _base_split_names(split_expr):
+            if base not in split_names:
+                missing[name] = split_expr
+                break
+
     if missing:
         details = ", ".join(f"{name}={split!r}" for name, split in missing.items())
         raise ValueError(
@@ -52,8 +77,36 @@ def validate_official_splits(cfg: AdapterFineTuneConfig) -> tuple[list[str], boo
             f"{cfg.dataset_name}/{cfg.dataset_config}: {details}. "
             f"Available official splits: {split_names}"
         )
+
     print(f"[data] official dataset splits found: {split_names}")
     return split_names, True
+
+# def validate_official_splits(cfg: AdapterFineTuneConfig) -> tuple[list[str], bool]:
+#     requested = {
+#         "train_split": cfg.train_split,
+#         "val_split": cfg.val_split,
+#         "test_split": cfg.test_split,
+#     }
+#     try:
+#         split_names = _official_split_names(cfg)
+#     except Exception as exc:
+#         requested_splits = sorted(set(requested.values()))
+#         print(
+#             "[data] could not inspect official dataset split metadata before loading; "
+#             f"will request named splits directly: {requested_splits}. Reason: {exc}"
+#         )
+#         return requested_splits, False
+
+#     missing = {name: split for name, split in requested.items() if split not in split_names}
+#     if missing:
+#         details = ", ".join(f"{name}={split!r}" for name, split in missing.items())
+#         raise ValueError(
+#             f"Requested split(s) are not official splits for "
+#             f"{cfg.dataset_name}/{cfg.dataset_config}: {details}. "
+#             f"Available official splits: {split_names}"
+#         )
+#     print(f"[data] official dataset splits found: {split_names}")
+#     return split_names, True
 
 
 def load_and_pack_texts(

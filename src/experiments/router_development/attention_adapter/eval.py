@@ -6,7 +6,7 @@ from experiments.router_development.attention_adapter.utils import lm_loss
 import torch
 import torch.nn as nn
 
-from experiments.router_development.attention_adapter.adapters import AdapterModel
+from experiments.router_development.attention_adapter.adapters.adapters import AdapterModel
 from experiments.router_development.attention_adapter.utils import lm_loss
 
 @torch.no_grad()

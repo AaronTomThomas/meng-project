@@ -10,10 +10,8 @@ import torch
 
 
 from experiments.router_development.attention_adapter.config import (
-    AKAZAFreeZConfig,
-    AdapterFineTuneConfig,
     AdapterMethod,
-    LoRAFineTuneConfig,
+    REFT_METHODS,
     config_from_args,
 )
 from experiments.router_development.attention_adapter.models import (
@@ -43,6 +41,24 @@ COMMANDS = (
         help_text="GPT-2 official Hugging Face PEFT LoRA baseline.",
     ),
     CommandSpec(
+        name="gpt2-loreft",
+        family="gpt2",
+        method=AdapterMethod.LOREFT,
+        help_text="GPT-2 LoReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
+        name="gpt2-noreft",
+        family="gpt2",
+        method=AdapterMethod.NOREFT,
+        help_text="GPT-2 NoReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
+        name="gpt2-direft",
+        family="gpt2",
+        method=AdapterMethod.DI_REFT,
+        help_text="GPT-2 DiReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
         name="pythia-akaza",
         family="pythia",
         method=AdapterMethod.AKAZA_FREEZ,
@@ -53,6 +69,24 @@ COMMANDS = (
         family="pythia",
         method=AdapterMethod.LORA,
         help_text="Pythia/GPT-NeoX official Hugging Face PEFT LoRA baseline.",
+    ),
+    CommandSpec(
+        name="pythia-loreft",
+        family="pythia",
+        method=AdapterMethod.LOREFT,
+        help_text="Pythia/GPT-NeoX LoReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
+        name="pythia-noreft",
+        family="pythia",
+        method=AdapterMethod.NOREFT,
+        help_text="Pythia/GPT-NeoX NoReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
+        name="pythia-direft",
+        family="pythia",
+        method=AdapterMethod.DI_REFT,
+        help_text="Pythia/GPT-NeoX DiReFT residual-stream intervention baseline.",
     ),
 )
 
@@ -132,6 +166,20 @@ def add_lora_args(parser: argparse.ArgumentParser, defaults: ModelFamilyDefaults
     group.add_argument("--lora_dropout", type=float, default=0.05)
     group.add_argument("--lora_bias", type=str, default="none", choices=["none", "all", "lora_only"])
 
+def add_reft_args(parser: argparse.ArgumentParser, defaults: ModelFamilyDefaults) -> None:
+    group = parser.add_argument_group("ReFT")
+    group.add_argument("--reft_rank", type=int, default=4)
+    group.add_argument("--reft_dropout", type=float, default=0.05)
+    group.add_argument("--reft_output_scale", type=float, default=1.0)
+    group.add_argument(
+        "--reft_position_mode",
+        type=str,
+        default="all",
+        choices=["all", "prefix", "suffix", "prefix_suffix"],
+    )
+    group.add_argument("--reft_prefix_positions", type=int, default=0)
+    group.add_argument("--reft_suffix_positions", type=int, default=0)
+
 def add_method_args(
     parser: argparse.ArgumentParser,
     *,
@@ -144,7 +192,9 @@ def add_method_args(
     if method is AdapterMethod.LORA:
         add_lora_args(parser, defaults)
         return
-
+    if method in REFT_METHODS:
+        add_reft_args(parser, defaults)
+        return
 
 def add_command_parser(subparsers: argparse._SubParsersAction, spec: CommandSpec) -> None:
     defaults = DEFAULT_FAMILY_SPECS[spec.family]

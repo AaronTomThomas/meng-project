@@ -13,9 +13,18 @@ from experiments.attention_learners import LearnerHyperParams
 class AdapterMethod(str, Enum):
     AKAZA_FREEZ = "akaza_freez"
     LORA = "lora"
+
+    LOREFT = "loreft"
+    NOREFT = "noreft"
+    DI_REFT = "direft"
     def __str__(self) -> str:
         return self.value
 
+REFT_METHODS: set[AdapterMethod] = {
+    AdapterMethod.LOREFT,
+    AdapterMethod.NOREFT,
+    AdapterMethod.DI_REFT,
+}
 
 @dataclass
 class BaseAdapterFineTuneConfig(LearnerHyperParams):
@@ -83,15 +92,40 @@ class LoRAFineTuneConfig(BaseAdapterFineTuneConfig):
     lora_dropout: float = 0.05
     lora_bias: str = "none"
 
-AdapterFineTuneConfig: TypeAlias = AKAZAFreeZConfig | LoRAFineTuneConfig 
 
-CONFIG_TYPES: dict[AdapterMethod, type[AdapterFineTuneConfig]] = {
+@dataclass
+class ReFTFineTuneConfig(BaseAdapterFineTuneConfig):
+    method: AdapterMethod = AdapterMethod.LOREFT
+    reft_rank: int = 4
+    reft_dropout: float = 0.05
+    reft_output_scale: float = 1.0
+    reft_position_mode: str = "all"
+    reft_prefix_positions: int = 0
+    reft_suffix_positions: int = 0
+
+AdapterFineTuneConfig: TypeAlias = (
+    AKAZAFreeZConfig
+    | LoRAFineTuneConfig
+    | ReFTFineTuneConfig
+)
+
+CONFIG_TYPES: dict[AdapterMethod, type[BaseAdapterFineTuneConfig]] = {
     AdapterMethod.AKAZA_FREEZ: AKAZAFreeZConfig,
     AdapterMethod.LORA: LoRAFineTuneConfig,
+
+    AdapterMethod.LOREFT: ReFTFineTuneConfig,
+    AdapterMethod.NOREFT: ReFTFineTuneConfig,
+    AdapterMethod.DI_REFT: ReFTFineTuneConfig,
 }
 
 
 def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
+    try:
+        method = args.method if isinstance(args.method, AdapterMethod) else AdapterMethod(args.method)
+    except ValueError as exc:
+        choices = sorted(method.value for method in CONFIG_TYPES)
+        raise ValueError(f"Unknown method={args.method!r}; choices={choices}") from exc
+
     try:
         config_type = CONFIG_TYPES[args.method]
     except KeyError as exc:
@@ -99,38 +133,49 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
         raise ValueError(f"Unknown method={args.method!r}; choices={choices}") from exc
     
     config_kwargs: dict[str, Any] = {
+
+        "method": method,
+
         "model_family": args.model_family,
         "model_name": args.model_name,
         "dataset_name": args.dataset_name,
         "dataset_config": args.dataset_config,
         "dataset_revision": args.dataset_revision,
         "text_field": args.text_field,
+
         "train_split": args.train_split,
         "val_split": args.val_split,
         "test_split": args.test_split,
+
         "max_train_texts": args.max_train_texts,
         "max_val_texts": args.max_val_texts,
         "max_test_texts": args.max_test_texts,
+
         "max_train_chunks": args.max_train_chunks,
         "max_val_chunks": args.max_val_chunks,
         "max_test_chunks": args.max_test_chunks,
+
         "block_size": args.block_size,
         "batch_size": args.batch_size,
         "layer_indices": args.layer_indices,
+
         "peft_l2": args.peft_l2,
         "peft_l1": args.peft_l1,
+
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "epochs": args.epochs,
         "patience": args.patience,
         "eval_every": args.eval_every,
         "grad_clip": args.grad_clip,
+
         "seed": args.seed,
         "device": args.device,
         "output_path": args.output_path,
         "cache_dir": args.cache_dir or f"outputs/attention_adapter/cache_{args.model_family}/",
         "skip_freeze_check": args.skip_freeze_check,
         "eval_test_during_training": args.eval_test_during_training,
+
         "split": args.train_split,
         "max_texts": args.max_train_texts,
         "max_chunks": args.max_train_chunks,
@@ -150,6 +195,17 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             lora_bias=args.lora_bias,
+        )
+        return config_type(**config_kwargs)
+
+    if method in REFT_METHODS:
+        config_kwargs.update(
+            reft_rank=args.reft_rank,
+            reft_dropout=args.reft_dropout,
+            reft_output_scale=args.reft_output_scale,
+            reft_position_mode=args.reft_position_mode,
+            reft_prefix_positions=args.reft_prefix_positions,
+            reft_suffix_positions=args.reft_suffix_positions,
         )
         return config_type(**config_kwargs)
     
