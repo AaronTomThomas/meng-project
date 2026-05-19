@@ -1,6 +1,6 @@
 from typing import Any, Dict, Sequence
 
-from experiments.router_development.attention_adapter.adapters.adapters import AdapterModel
+from experiments.router_development.attention_adapter.adapters.base import AdapterModel
 from experiments.router_development.attention_adapter.adapters.utils import delta_stats
 from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig
 import torch

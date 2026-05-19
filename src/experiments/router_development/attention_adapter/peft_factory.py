@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from experiments.router_development.attention_adapter.adapters.lora_adapters import OfficialPEFTAdapter
 from experiments.router_development.attention_adapter.adapters.reft_adapters import ResidualReFTAdapter
 import torch.nn as nn
 
-from experiments.router_development.attention_adapter.adapters.adapters import (
+from experiments.router_development.attention_adapter.adapters.akaza_adapters import (
     GPT2AKAZAAdapter,
-    OfficialPEFTAdapter,
     PythiaAKAZAAdapter,
 )
 from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig, AdapterMethod, REFT_METHODS
