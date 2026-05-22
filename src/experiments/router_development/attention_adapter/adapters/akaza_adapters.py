@@ -163,6 +163,8 @@ class PythiaAKAZAAdapter(AdapterModel):
                 for layer_idx in self.layer_indices
             }
         )
+        for p in self.adapters.parameters():
+            p.requires_grad_(True)
 
     @property
     def device(self) -> torch.device:

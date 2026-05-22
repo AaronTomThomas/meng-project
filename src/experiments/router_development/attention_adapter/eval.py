@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from experiments.router_development.attention_adapter.adapters.base import AdapterModel
 from experiments.router_development.attention_adapter.utils import lm_loss
 import torch
 import torch.nn as nn

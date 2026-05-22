@@ -12,10 +12,6 @@ class ModelFamilyDefaults:
     default_layer_indices: str
     default_batch_size: int
 
-    default_train_texts: int
-    default_val_texts: int
-    default_test_texts: int
-
     default_train_chunks: int
     default_val_chunks: int
     default_test_chunks: int
@@ -46,16 +42,13 @@ GPT2_DEFAULTS = ModelFamilyDefaults(
     default_layer_indices="6,7,8,9,10,11",
 
     default_batch_size=4,
-    default_train_texts=1000,
-    default_val_texts=200,
-    default_test_texts=200,
 
     default_train_chunks=2048,
     default_val_chunks=512,
     default_test_chunks=512,
 
     default_bottleneck_dim=4,
-    default_output_scale=0.05,
+    default_output_scale=1.0,
     default_epochs=500,
     default_patience=30,
 
@@ -78,10 +71,6 @@ PYTHIA_DEFAULTS = ModelFamilyDefaults(
     default_model_name="EleutherAI/pythia-1b",
     default_layer_indices="10,11,12,13,14,15",
     default_batch_size=1,
-
-    default_train_texts=500,
-    default_val_texts=100,
-    default_test_texts=100,
 
     default_train_chunks=512,
     default_val_chunks=128,

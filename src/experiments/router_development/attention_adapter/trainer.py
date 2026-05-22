@@ -83,9 +83,17 @@ class TrainableParameters:
     
     def load_trainable_state_dict(self, wrapped: torch.nn.Module, state: dict[str, torch.Tensor]) -> None:
         named_params = dict(wrapped.named_parameters())
-        missing = [name for name in state if name not in named_params]
+        expected = {name for name, p in wrapped.named_parameters() if p.requires_grad}
+        actual = set(state)
+        unknown = sorted(actual - set(named_params))
+        if unknown:
+            raise KeyError(f"State contains unknown parameter names: {unknown[:10]}")
+        missing = sorted(expected - actual)
         if missing:
-            raise KeyError(f"State contains unknown parameter names: {missing[:10]}")
+            raise KeyError(f"State is missing trainable parameter names: {missing[:10]}")
+        extra = sorted(actual - expected)
+        if extra:
+            raise KeyError(f"State contains non-trainable parameter names: {extra[:10]}")
         with torch.no_grad():
             for name, value in state.items():
                 named_params[name].copy_(value.to(device=named_params[name].device, dtype=named_params[name].dtype))

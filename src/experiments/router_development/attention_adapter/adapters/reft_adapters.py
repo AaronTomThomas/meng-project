@@ -1,13 +1,13 @@
 from typing import Any, Dict, Sequence
 
-from experiments.router_development.attention_adapter.adapters.base import AdapterModel
+from experiments.router_development.attention_adapter.adapters.akaza_adapters import AdapterModel
 from experiments.router_development.attention_adapter.adapters.utils import delta_stats
 from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-REFT_METHODS = {"loreft", "noreft", "direft"}
+REFT_METHODS = {"loreft", "direft"}
 REFT_POSITION_MODES = {"all", "prefix", "suffix", "prefix_suffix"}
 
 def extract_hidden(output: Any) -> torch.Tensor:
@@ -58,7 +58,7 @@ class ReFTIntervention(nn.Module):
         self.output_scale = float(output_scale)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        if method in {"loreft", "noreft"}:
+        if method in {"loreft"}:
             basis = torch.zeros(rank, hidden_size)
             basis[:, :rank] = torch.eye(rank)
 
@@ -83,7 +83,7 @@ class ReFTIntervention(nn.Module):
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         hidden_f = hidden.float()
 
-        if self.method in {"loreft", "noreft"}:
+        if self.method in {"loreft"}:
             r = self.projected_r().float()
             w = self.w.float()
 
@@ -98,9 +98,6 @@ class ReFTIntervention(nn.Module):
 
         return hidden + (self.output_scale * delta).to(dtype=hidden.dtype, device=hidden.device)
     
-
-
-
 
 def reft_position_mask(
     *,
@@ -141,7 +138,6 @@ class ResidualReFTAdapter(AdapterModel):
 
     Supports:
       - loreft
-      - noreft
       - direft
 
     GPT-2:

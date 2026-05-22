@@ -14,7 +14,7 @@ def short_hash(s: str) -> str:
 def _text_cache_key(cfg: AdapterFineTuneConfig, text_field: str) -> str:
     return (
         f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.dataset_revision}|{cfg.split}|"
-        f"text={text_field}|max_texts={cfg.max_texts}|block={cfg.block_size}|"
+        f"text={text_field}|block={cfg.block_size}|"
         f"max_chunks={cfg.max_chunks}"
     )
 
@@ -145,8 +145,6 @@ def load_and_pack_texts(
         ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
         token_blocks.append(ids)
         total_texts += 1
-        if total_texts >= cfg.max_texts:
-            break
     if not token_blocks:
         raise ValueError("No usable token blocks found.")
     chunks = torch.cat(token_blocks, dim=0)[: cfg.max_chunks]
@@ -159,10 +157,9 @@ def load_chunks_for_split(
     tokenizer,
     *,
     split: str,
-    max_texts: int,
     max_chunks: int,
 ) -> torch.Tensor:
-    split_cfg = replace(cfg, split=split, max_texts=max_texts, max_chunks=max_chunks)
+    split_cfg = replace(cfg, split=split, max_chunks=max_chunks)
     chunks = load_and_pack_texts(split_cfg, tokenizer, text_field=cfg.text_field).cpu()
     if max_chunks > 0:
         chunks = chunks[:max_chunks]
@@ -192,21 +189,18 @@ def load_adapter_finetune_data(cfg: AdapterFineTuneConfig, tokenizer) -> Adapter
             cfg,
             tokenizer,
             split=cfg.train_split,
-            max_texts=cfg.max_train_texts,
             max_chunks=cfg.max_train_chunks,
         ),
         val=load_chunks_for_split(
             cfg,
             tokenizer,
             split=cfg.val_split,
-            max_texts=cfg.max_val_texts,
             max_chunks=cfg.max_val_chunks,
         ),
         test=load_chunks_for_split(
             cfg,
             tokenizer,
             split=cfg.test_split,
-            max_texts=cfg.max_test_texts,
             max_chunks=cfg.max_test_chunks,
         ),
         official_splits=official_splits,

@@ -46,12 +46,7 @@ COMMANDS = (
         method=AdapterMethod.LOREFT,
         help_text="GPT-2 LoReFT residual-stream intervention baseline.",
     ),
-    CommandSpec(
-        name="gpt2-noreft",
-        family="gpt2",
-        method=AdapterMethod.NOREFT,
-        help_text="GPT-2 NoReFT residual-stream intervention baseline.",
-    ),
+
     CommandSpec(
         name="gpt2-direft",
         family="gpt2",
@@ -76,12 +71,7 @@ COMMANDS = (
         method=AdapterMethod.LOREFT,
         help_text="Pythia/GPT-NeoX LoReFT residual-stream intervention baseline.",
     ),
-    CommandSpec(
-        name="pythia-noreft",
-        family="pythia",
-        method=AdapterMethod.NOREFT,
-        help_text="Pythia/GPT-NeoX NoReFT residual-stream intervention baseline.",
-    ),
+
     CommandSpec(
         name="pythia-direft",
         family="pythia",
@@ -109,10 +99,6 @@ def add_data_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--train_split", type=str, default="train")
     group.add_argument("--val_split", type=str, default="validation")
     group.add_argument("--test_split", type=str, default="test")
-
-    group.add_argument("--max_train_texts", type=int, required=True)
-    group.add_argument("--max_val_texts", type=int, required=True)
-    group.add_argument("--max_test_texts", type=int, required=True)
 
     group.add_argument("--block_size", type=int, required=True)    
     group.add_argument("--batch_size", type=int, required=True)

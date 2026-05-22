@@ -15,14 +15,12 @@ class AdapterMethod(str, Enum):
     LORA = "lora"
 
     LOREFT = "loreft"
-    NOREFT = "noreft"
     DI_REFT = "direft"
     def __str__(self) -> str:
         return self.value
 
 REFT_METHODS: set[AdapterMethod] = {
     AdapterMethod.LOREFT,
-    AdapterMethod.NOREFT,
     AdapterMethod.DI_REFT,
 }
 
@@ -38,11 +36,6 @@ class BaseAdapterFineTuneConfig(LearnerHyperParams):
     train_split: str = "train"
     val_split: str = "validation"
     test_split: str = "test"
-
-    max_train_texts: int = 1000
-    max_val_texts: int = 200
-    max_test_texts: int = 200
-
 
     block_size: int = 96
     batch_size: int = 4
@@ -72,7 +65,6 @@ class BaseAdapterFineTuneConfig(LearnerHyperParams):
     eval_test_during_training: bool = False
 
     split: str = "train"
-    max_texts: int = 1000
     max_chunks: int = 2048
 
 @dataclass
@@ -114,7 +106,6 @@ CONFIG_TYPES: dict[AdapterMethod, type[BaseAdapterFineTuneConfig]] = {
     AdapterMethod.LORA: LoRAFineTuneConfig,
 
     AdapterMethod.LOREFT: ReFTFineTuneConfig,
-    AdapterMethod.NOREFT: ReFTFineTuneConfig,
     AdapterMethod.DI_REFT: ReFTFineTuneConfig,
 }
 
@@ -147,10 +138,6 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
         "val_split": args.val_split,
         "test_split": args.test_split,
 
-        "max_train_texts": args.max_train_texts,
-        "max_val_texts": args.max_val_texts,
-        "max_test_texts": args.max_test_texts,
-
         "max_train_chunks": args.max_train_chunks,
         "max_val_chunks": args.max_val_chunks,
         "max_test_chunks": args.max_test_chunks,
@@ -177,18 +164,17 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
         "eval_test_during_training": args.eval_test_during_training,
 
         "split": args.train_split,
-        "max_texts": args.max_train_texts,
         "max_chunks": args.max_train_chunks,
     }
 
-    if args.method is AdapterMethod.AKAZA_FREEZ:
+    if method is AdapterMethod.AKAZA_FREEZ:
         config_kwargs.update(
             bottleneck_dim=args.bottleneck_dim,
             adapter_dropout=args.adapter_dropout,
             output_scale=args.output_scale,
         )
         return config_type(**config_kwargs)
-    if args.method is AdapterMethod.LORA:
+    if method is AdapterMethod.LORA:
         config_kwargs.update(
             peft_target_profile=args.peft_target_profile,
             lora_rank=args.lora_rank,
