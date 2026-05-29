@@ -46,13 +46,6 @@ COMMANDS = (
         method=AdapterMethod.LOREFT,
         help_text="GPT-2 LoReFT residual-stream intervention baseline.",
     ),
-
-    CommandSpec(
-        name="gpt2-direft",
-        family="gpt2",
-        method=AdapterMethod.DI_REFT,
-        help_text="GPT-2 DiReFT residual-stream intervention baseline.",
-    ),
     CommandSpec(
         name="pythia-akaza",
         family="pythia",
@@ -70,13 +63,6 @@ COMMANDS = (
         family="pythia",
         method=AdapterMethod.LOREFT,
         help_text="Pythia/GPT-NeoX LoReFT residual-stream intervention baseline.",
-    ),
-
-    CommandSpec(
-        name="pythia-direft",
-        family="pythia",
-        method=AdapterMethod.DI_REFT,
-        help_text="Pythia/GPT-NeoX DiReFT residual-stream intervention baseline.",
     ),
 )
 

@@ -1,9 +1,10 @@
 # Attention Adapter
 
-Clean training package for the AKAZA/FreeZ attention adapter experiments and
-LoRA baselines. IA3 is intentionally not included here.
+Training entrypoints for the AKAZA/FreeZ attention adapter experiments and LoRA baselines. The runs here train on packed language-modeling text chunks. Downstream task fine-tuning lives in `fine_tuning_evaluation/`.
 
-## Help
+IA3 is intentionally not included in this package.
+
+## CLI Help
 
 Each model/method pair has its own subcommand:
 
@@ -17,8 +18,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
 
 ## Smoke Test
 
-Small CPU run to check imports, argument wiring, dataset loading, training, and
-checkpoint writing:
+Small CPU run for imports, argument wiring, dataset loading, training, and checkpoint writing:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-akaza \
@@ -40,10 +40,11 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/smoke_gpt2_akaza.pt
 ```
 
-## GPT-2 AKAZA/FreeZ
+## GPT-2 Runs
+
+### GPT-2 AKAZA/FreeZ
 
 ```bash
-
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-akaza \
   --device cuda \
   --layer_indices 6,7,8,9,10,11 \
@@ -63,7 +64,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/gpt2_akaza.pt
 ```
 
-## GPT-2 LoRA
+### GPT-2 LoRA
 
 ```bash
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-lora \
@@ -87,7 +88,9 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/gpt2_lora_attn_c_proj.pt
 ```
 
-## Pythia/GPT-NeoX AKAZA/FreeZ
+## Pythia/GPT-NeoX Runs
+
+### Pythia/GPT-NeoX AKAZA/FreeZ
 
 ```bash
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-akaza \
@@ -109,7 +112,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/pythia_akaza.pt
 ```
 
-## Pythia/GPT-NeoX LoRA
+### Pythia/GPT-NeoX LoRA
 
 ```bash
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-lora \
@@ -133,7 +136,7 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/pythia_lora_attn_dense.pt
 ```
 
-## Dataset Arguments
+## Dataset Overrides
 
 The commands above use WikiText-2 raw by default:
 
@@ -146,8 +149,7 @@ The commands above use WikiText-2 raw by default:
 --test_split test
 ```
 
-For another Hugging Face text dataset, pass the dataset arguments explicitly.
-For example, Penn Treebank via the generated Parquet revision:
+For another Hugging Face text dataset, pass the dataset arguments explicitly. For example, Penn Treebank via the generated Parquet revision:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-akaza \

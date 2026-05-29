@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-REFT_METHODS = {"loreft", "direft"}
+REFT_METHODS = {"loreft"}
 REFT_POSITION_MODES = {"all", "prefix", "suffix", "prefix_suffix"}
 
 def extract_hidden(output: Any) -> torch.Tensor:
@@ -58,43 +58,27 @@ class ReFTIntervention(nn.Module):
         self.output_scale = float(output_scale)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        if method in {"loreft"}:
-            basis = torch.zeros(rank, hidden_size)
-            basis[:, :rank] = torch.eye(rank)
+        basis = torch.zeros(rank, hidden_size)
+        basis[:, :rank] = torch.eye(rank)
 
-            self.r = nn.Parameter(basis.clone())
-            self.w = nn.Parameter(basis.clone())
-            self.bias = nn.Parameter(torch.zeros(rank))
-        else:
-            self.w1 = nn.Linear(hidden_size, rank)
-            self.w2 = nn.Linear(rank, hidden_size, bias=False)
-
-            nn.init.normal_(self.w1.weight, mean=0.0, std=0.02)
-            nn.init.zeros_(self.w1.bias)
-            nn.init.zeros_(self.w2.weight)
+        self.r = nn.Parameter(basis.clone())
+        self.w = nn.Parameter(basis.clone())
+        self.bias = nn.Parameter(torch.zeros(rank))
 
     def projected_r(self) -> torch.Tensor:
-        if self.method != "loreft":
-            return self.r
-
         q, _ = torch.linalg.qr(self.r.transpose(0, 1), mode="reduced")
         return q.transpose(0, 1)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         hidden_f = hidden.float()
 
-        if self.method in {"loreft"}:
-            r = self.projected_r().float()
-            w = self.w.float()
+        r = self.projected_r().float()
+        w = self.w.float()
 
-            source = F.linear(hidden_f, w, self.bias.float())
-            base = F.linear(hidden_f, r)
-
-            delta_low_rank = self.dropout(source - base)
-            delta = F.linear(delta_low_rank, r.transpose(0, 1))
-        else:
-            low_rank = self.dropout(self.w1(hidden_f))
-            delta = self.w2(low_rank)
+        source = F.linear(hidden_f, w, self.bias.float())
+        base = F.linear(hidden_f, r)
+        delta_low_rank = self.dropout(source - base)
+        delta = F.linear(delta_low_rank, r.transpose(0, 1))
 
         return hidden + (self.output_scale * delta).to(dtype=hidden.dtype, device=hidden.device)
     
@@ -136,9 +120,7 @@ class ResidualReFTAdapter(AdapterModel):
     """
     Residual-stream ReFT adapter.
 
-    Supports:
-      - loreft
-      - direft
+    Supports LoReFT residual-stream interventions.
 
     GPT-2:
       hooks model.transformer.h[layer_idx]

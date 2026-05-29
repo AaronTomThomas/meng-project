@@ -28,6 +28,39 @@ def infer_num_layers(model, model_family: str) -> int:
     raise ValueError(f"Unknown model_family={model_family!r}")
 
 
+def parse_layer_indices(layer_indices: str) -> list[int]:
+    parsed = sorted(int(x.strip()) for x in layer_indices.split(",") if x.strip())
+    if not parsed:
+        raise ValueError("--layer_indices cannot be empty")
+    return parsed
+
+
+def build_adapter_model(
+    cfg: AdapterFineTuneConfig,
+    device: torch.device,
+) -> tuple[torch.nn.Module, list[int]]:
+    if cfg.model_family not in DEFAULT_FAMILY_SPECS:
+        raise ValueError(f"Unknown model_family={cfg.model_family!r}; choices={sorted(DEFAULT_FAMILY_SPECS)}")
+    if not isinstance(cfg.method, AdapterMethod):
+        choices = [method.value for method in METHODS]
+        raise TypeError(f"cfg.method must be an AdapterMethod enum, got {cfg.method!r}; choices={choices}")
+    if cfg.method not in METHODS:
+        choices = [method.value for method in METHODS]
+        raise ValueError(f"Unknown method={cfg.method!r}; choices={choices}")
+
+    layer_indices = parse_layer_indices(cfg.layer_indices)
+    model = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+
+    n_layers = infer_num_layers(model, cfg.model_family)
+    for layer_idx in layer_indices:
+        if layer_idx < 0 or layer_idx >= n_layers:
+            raise ValueError(f"layer_idx={layer_idx} out of range for n_layers={n_layers}")
+    return build_wrapped_model(model=model, cfg=cfg, layer_indices=layer_indices).to(device), layer_indices
+
+
 @dataclass
 class TrainableParameters:
     params: list[torch.nn.Parameter]
@@ -174,23 +207,13 @@ def train_one_epoch(
     return total_loss / max(1, total_examples)
 
 def train(cfg: AdapterFineTuneConfig) -> None:
-    if cfg.model_family not in DEFAULT_FAMILY_SPECS:
-        raise ValueError(f"Unknown model_family={cfg.model_family!r}; choices={sorted(DEFAULT_FAMILY_SPECS)}")
-    if not isinstance(cfg.method, AdapterMethod):
-        choices = [method.value for method in METHODS]
-        raise TypeError(f"cfg.method must be an AdapterMethod enum, got {cfg.method!r}; choices={choices}")
-    if cfg.method not in METHODS:
-        choices = [method.value for method in METHODS]
-        raise ValueError(f"Unknown method={cfg.method!r}; choices={choices}")
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(cfg.seed)
 
     device = torch.device(cfg.device)
-    layer_indices = sorted(int(x.strip()) for x in cfg.layer_indices.split(",") if x.strip())
-    if not layer_indices:
-        raise ValueError("--layer_indices cannot be empty")
+    layer_indices = parse_layer_indices(cfg.layer_indices)
 
     print("[config]")
     for k, v in asdict(cfg).items():
@@ -207,7 +230,6 @@ def train(cfg: AdapterFineTuneConfig) -> None:
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
-
     n_layers = infer_num_layers(model, cfg.model_family)
     print(f"[model] family={cfg.model_family} layers={n_layers}")
     for layer_idx in layer_indices:

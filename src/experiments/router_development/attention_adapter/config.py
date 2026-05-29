@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, TypeAlias
 
@@ -15,13 +15,11 @@ class AdapterMethod(str, Enum):
     LORA = "lora"
 
     LOREFT = "loreft"
-    DI_REFT = "direft"
     def __str__(self) -> str:
         return self.value
 
 REFT_METHODS: set[AdapterMethod] = {
     AdapterMethod.LOREFT,
-    AdapterMethod.DI_REFT,
 }
 
 @dataclass
@@ -106,27 +104,29 @@ CONFIG_TYPES: dict[AdapterMethod, type[BaseAdapterFineTuneConfig]] = {
     AdapterMethod.LORA: LoRAFineTuneConfig,
 
     AdapterMethod.LOREFT: ReFTFineTuneConfig,
-    AdapterMethod.DI_REFT: ReFTFineTuneConfig,
 }
 
 
-def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
+def config_from_values(method: str | AdapterMethod, **values: Any) -> AdapterFineTuneConfig:
     try:
-        method = args.method if isinstance(args.method, AdapterMethod) else AdapterMethod(args.method)
+        method = method if isinstance(method, AdapterMethod) else AdapterMethod(method)
     except ValueError as exc:
         choices = sorted(method.value for method in CONFIG_TYPES)
-        raise ValueError(f"Unknown method={args.method!r}; choices={choices}") from exc
+        raise ValueError(f"Unknown method={method!r}; choices={choices}") from exc
 
     try:
-        config_type = CONFIG_TYPES[args.method]
+        config_type = CONFIG_TYPES[method]
     except KeyError as exc:
         choices = sorted(method.value for method in CONFIG_TYPES)
-        raise ValueError(f"Unknown method={args.method!r}; choices={choices}") from exc
-    
+        raise ValueError(f"Unknown method={method!r}; choices={choices}") from exc
+
+    values = {"method": method, **values}
+    names = {field.name for field in fields(config_type)}
+    return config_type(**{key: value for key, value in values.items() if key in names})
+
+
+def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
     config_kwargs: dict[str, Any] = {
-
-        "method": method,
-
         "model_family": args.model_family,
         "model_name": args.model_name,
         "dataset_name": args.dataset_name,
@@ -165,34 +165,20 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
 
         "split": args.train_split,
         "max_chunks": args.max_train_chunks,
+        "bottleneck_dim": args.bottleneck_dim,
+        "adapter_dropout": args.adapter_dropout,
+        "output_scale": args.output_scale,
+        "peft_target_profile": args.peft_target_profile,
+        "lora_rank": args.lora_rank,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+        "lora_bias": args.lora_bias,
+        "reft_rank": args.reft_rank,
+        "reft_dropout": args.reft_dropout,
+        "reft_output_scale": args.reft_output_scale,
+        "reft_position_mode": args.reft_position_mode,
+        "reft_prefix_positions": args.reft_prefix_positions,
+        "reft_suffix_positions": args.reft_suffix_positions,
     }
 
-    if method is AdapterMethod.AKAZA_FREEZ:
-        config_kwargs.update(
-            bottleneck_dim=args.bottleneck_dim,
-            adapter_dropout=args.adapter_dropout,
-            output_scale=args.output_scale,
-        )
-        return config_type(**config_kwargs)
-    if method is AdapterMethod.LORA:
-        config_kwargs.update(
-            peft_target_profile=args.peft_target_profile,
-            lora_rank=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            lora_bias=args.lora_bias,
-        )
-        return config_type(**config_kwargs)
-
-    if method in REFT_METHODS:
-        config_kwargs.update(
-            reft_rank=args.reft_rank,
-            reft_dropout=args.reft_dropout,
-            reft_output_scale=args.reft_output_scale,
-            reft_position_mode=args.reft_position_mode,
-            reft_prefix_positions=args.reft_prefix_positions,
-            reft_suffix_positions=args.reft_suffix_positions,
-        )
-        return config_type(**config_kwargs)
-    
-    raise ValueError(f"Unknown method={args.method!r}")
+    return config_from_values(args.method, **config_kwargs)
