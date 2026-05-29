@@ -6,8 +6,8 @@ from typing import Literal
 import torch
 
 
-MethodName = Literal["base", "akaza_freez", "lora", "direft", "loreft", "reft"]
-TaskName = Literal["sst2", "boolq", "e2e_nlg"]
+MethodName = Literal["zero_shot", "full_finetune", "akaza_freez", "lora", "loreft", "reft"]
+TaskName = Literal["sst2"]
 
 
 @dataclass
@@ -35,7 +35,9 @@ class FineTuneEvalConfig:
     checkpoint_path: str | None = None
     do_train: bool = False
     do_eval: bool = False
-    generate: bool = False
+    selection_split_from_train: float = 0.0
+    selection_split_seed: int | None = None
+    glue_data_dir: str = "glue_data"
 
     model_family: str | None = None
     layer_indices: str | None = None
@@ -60,4 +62,3 @@ class FineTuneEvalConfig:
 
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
-

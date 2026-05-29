@@ -1,35 +1,84 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any, Iterable, Sequence
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 
-from experiments.router_development.attention_adapter.fine_tuning_evaluation.collators import CausalLMCollator
-from experiments.router_development.attention_adapter.fine_tuning_evaluation.formatting import format_example
-from experiments.router_development.attention_adapter.fine_tuning_evaluation.metrics import accuracy, bleu_1_to_4, rouge_l
-from experiments.router_development.attention_adapter.fine_tuning_evaluation.tasks import TaskSpec
+from experiments.router_development.attention_adapter.fine_tuning_evaluation.tasks import GlueTaskSpec, format_example
+from experiments.router_development.attention_adapter.utils import masked_lm_loss, model_logits
 
 
-def model_logits(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
-    output = model(input_ids)
-    return output.logits if hasattr(output, "logits") else output
+def accuracy(predictions: list[str], references: list[str]) -> float:
+    if not references:
+        return 0.0
+    return sum(p == r for p, r in zip(predictions, references)) / len(references)
 
 
-def masked_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, int]:
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = labels[:, 1:].contiguous()
-    token_count = int((shift_labels != -100).sum().item())
-    loss = F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-        ignore_index=-100,
-        reduction="sum",
-    )
-    return loss, token_count
+def _encode_prompt_target(
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: str,
+    target: str,
+    *,
+    max_length: int,
+    target_max_length: int,
+    add_eos: bool,
+) -> dict[str, list[int]]:
+    eos_budget = 1 if add_eos and tokenizer.eos_token_id is not None else 0
+    target_budget = min(target_max_length, max(1, max_length - eos_budget))
+    prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    target_ids = tokenizer(
+        target,
+        add_special_tokens=False,
+        truncation=True,
+        max_length=target_budget,
+    ).input_ids
+    available_prompt = max(0, max_length - len(target_ids) - eos_budget)
+    prompt_ids = prompt_ids[-available_prompt:] if available_prompt > 0 else []
+    ids = prompt_ids + target_ids
+    labels = [-100] * len(prompt_ids) + target_ids
+    if add_eos and tokenizer.eos_token_id is not None and len(ids) < max_length:
+        ids.append(tokenizer.eos_token_id)
+        labels.append(tokenizer.eos_token_id)
+    return {"input_ids": ids, "labels": labels}
+
+
+@dataclass
+class _GlueVerbalizerCollator:
+    tokenizer: PreTrainedTokenizerBase
+    task: GlueTaskSpec
+    max_length: int
+    target_max_length: int
+
+    def __call__(self, examples: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        rows = [format_example(self.task, example) for example in examples]
+        encoded = [
+            _encode_prompt_target(
+                self.tokenizer,
+                row["prompt"],
+                row["target"],
+                max_length=self.max_length,
+                target_max_length=self.target_max_length,
+                add_eos=self.task.add_eos_to_target,
+            )
+            for row in rows
+        ]
+        max_len = min(self.max_length, max(len(item["input_ids"]) for item in encoded))
+        pad_id = self.tokenizer.pad_token_id
+        input_ids, labels = [], []
+        for item in encoded:
+            ids = item["input_ids"][:max_len]
+            labs = item["labels"][:max_len]
+            pad_len = max_len - len(ids)
+            input_ids.append(ids + [pad_id] * pad_len)
+            labels.append(labs + [-100] * pad_len)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
 
 @torch.no_grad()
@@ -37,13 +86,15 @@ def evaluate_loss(
     model: torch.nn.Module,
     dataset: Iterable[dict[str, Any]],
     tokenizer: PreTrainedTokenizerBase,
-    task: TaskSpec,
+    task: GlueTaskSpec,
     *,
     batch_size: int,
     max_length: int,
     target_max_length: int,
     device: torch.device,
 ) -> dict[str, float]:
+    if not all(format_example(task, example)["target"] is not None for example in dataset):
+        return {"examples": float(len(dataset)) if hasattr(dataset, "__len__") else 0.0}
     if hasattr(model, "set_peft_eval_mode"):
         model.set_peft_eval_mode()
     else:
@@ -52,7 +103,7 @@ def evaluate_loss(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=CausalLMCollator(tokenizer, task, max_length, target_max_length),
+        collate_fn=_GlueVerbalizerCollator(tokenizer, task, max_length, target_max_length),
     )
     total_loss = 0.0
     total_tokens = 0
@@ -73,7 +124,7 @@ def score_candidates(
     model: torch.nn.Module,
     dataset: Iterable[dict[str, Any]],
     tokenizer: PreTrainedTokenizerBase,
-    task: TaskSpec,
+    task: GlueTaskSpec,
     *,
     max_length: int,
     target_max_length: int,
@@ -87,29 +138,49 @@ def score_candidates(
         model.eval()
     predictions: list[str] = []
     references: list[str] = []
+    reference_predictions: list[str] = []
     rows: list[dict[str, Any]] = []
     for idx, example in enumerate(dataset):
         row = format_example(task, example)
+        example_idx = example.get("idx", example.get("index", idx))
         prompt = row["prompt"]
         target = row["target"]
+        has_reference = target is not None
         scores: dict[str, float] = {}
         for label_name, candidate in task.candidates.items():
-            candidate_ids = tokenizer(candidate, add_special_tokens=False, truncation=True, max_length=target_max_length).input_ids
-            prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
-            prompt_ids = prompt_ids[-max(1, max_length - len(candidate_ids)) :]
-            ids = prompt_ids + candidate_ids
-            labels = [-100] * len(prompt_ids) + candidate_ids
-            input_ids = torch.tensor([ids], dtype=torch.long, device=device)
-            label_tensor = torch.tensor([labels], dtype=torch.long, device=device)
-            loss, token_count = masked_lm_loss(model_logits(model, input_ids), label_tensor)
-            scores[label_name] = -float(loss.item()) / max(1, token_count)
+            encoded = _encode_prompt_target(
+                tokenizer,
+                prompt,
+                candidate,
+                max_length=max_length,
+                target_max_length=target_max_length,
+                add_eos=task.add_eos_to_target,
+            )
+            input_ids = torch.tensor([encoded["input_ids"]], dtype=torch.long, device=device)
+            label_tensor = torch.tensor([encoded["labels"]], dtype=torch.long, device=device)
+            loss_sum, token_count = masked_lm_loss(model_logits(model, input_ids), label_tensor)
+            if task.score_normalization == "mean_token_logprob":
+                scores[label_name] = -float(loss_sum.item()) / max(1, token_count)
+            elif task.score_normalization == "sum_logprob":
+                scores[label_name] = -float(loss_sum.item())
+            else:
+                raise ValueError(
+                    f"Unknown score_normalization={task.score_normalization!r}; "
+                    "expected 'mean_token_logprob' or 'sum_logprob'"
+                )
         prediction = max(scores, key=scores.get)
-        reference = next((name for name, text in task.candidates.items() if text == target), target.strip())
+        reference = (
+            next((name for name, text in task.candidates.items() if text == target), target.strip())
+            if has_reference
+            else None
+        )
         predictions.append(prediction)
-        references.append(reference)
+        if reference is not None:
+            references.append(reference)
+            reference_predictions.append(prediction)
         rows.append(
             {
-                "idx": idx,
+                "idx": example_idx,
                 "prompt": prompt,
                 "reference": reference,
                 "prediction": prediction,
@@ -117,47 +188,6 @@ def score_candidates(
                 "candidate_logprobs_per_token": scores,
             }
         )
-    return {"accuracy": accuracy(predictions, references)}, rows
-
-
-@torch.no_grad()
-def generate_predictions(
-    model: torch.nn.Module,
-    dataset: Iterable[dict[str, Any]],
-    tokenizer: PreTrainedTokenizerBase,
-    task: TaskSpec,
-    *,
-    max_length: int,
-    target_max_length: int,
-    device: torch.device,
-) -> tuple[dict[str, float], list[dict[str, Any]]]:
-    if hasattr(model, "set_peft_eval_mode"):
-        model.set_peft_eval_mode()
-    else:
-        model.eval()
-    predictions: list[str] = []
-    references: list[str] = []
-    rows: list[dict[str, Any]] = []
-    eos = tokenizer.eos_token_id
-    for idx, example in enumerate(dataset):
-        row = format_example(task, example)
-        prompt_ids = tokenizer(row["prompt"], add_special_tokens=False, truncation=True, max_length=max_length).input_ids
-        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-        generated: list[int] = []
-        for _ in range(target_max_length):
-            logits = model_logits(model, input_ids)[:, -1, :]
-            next_id = int(torch.argmax(logits, dim=-1).item())
-            if eos is not None and next_id == eos:
-                break
-            generated.append(next_id)
-            if input_ids.shape[1] + 1 > max_length:
-                break
-            input_ids = torch.cat([input_ids, torch.tensor([[next_id]], dtype=torch.long, device=device)], dim=1)
-        prediction = tokenizer.decode(generated, skip_special_tokens=True).strip()
-        reference = row["target"].strip()
-        predictions.append(prediction)
-        references.append(reference)
-        rows.append({"idx": idx, "prompt": row["prompt"], "prediction": prediction, "reference": reference})
-    metrics = {"bleu": bleu_1_to_4(predictions, references), "rouge_l": rouge_l(predictions, references)}
-    return metrics, rows
-
+    if references:
+        return {"accuracy": accuracy(reference_predictions, references)}, rows
+    return {"predicted_examples": float(len(predictions))}, rows

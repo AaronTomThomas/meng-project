@@ -9,12 +9,13 @@ from experiments.router_development.attention_adapter.fine_tuning_evaluation.tra
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fine-tune and evaluate attention-adapter methods on downstream HF tasks."
+        description="Fine-tune and evaluate attention-adapter methods on official GLUE SST-2 files."
     )
     parser.add_argument("--model_name_or_path", type=str, required=True)
-    parser.add_argument("--method", type=str, required=True, choices=["base", "akaza_freez", "lora", "direft", "loreft", "reft"])
-    parser.add_argument("--task", type=str, required=True, choices=["sst2", "boolq", "e2e_nlg"])
+    parser.add_argument("--method", type=str, required=True, choices=["zero_shot", "full_finetune", "akaza_freez", "lora", "loreft", "reft"])
+    parser.add_argument("--task", type=str, required=True, choices=["sst2"])
     parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--glue_data_dir", type=str, default="glue_data")
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
@@ -34,7 +35,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--do_train", action="store_true")
     parser.add_argument("--do_eval", action="store_true")
-    parser.add_argument("--generate", action="store_true")
+    parser.add_argument("--selection_split_from_train", type=float, default=0.0)
+    parser.add_argument("--selection_split_seed", type=int, default=None)
 
     parser.add_argument("--model_family", type=str, default=None, choices=["gpt2", "pythia"])
     parser.add_argument("--layer_indices", type=str, default=None)
@@ -68,4 +70,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

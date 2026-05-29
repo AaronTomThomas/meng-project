@@ -4,88 +4,69 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 
-Formatter = Callable[[Mapping[str, Any]], tuple[str, str]]
+Formatter = Callable[[Mapping[str, Any]], tuple[str, str | None]]
 
 
 @dataclass(frozen=True)
-class TaskSpec:
+class GlueTaskSpec:
     name: str
-    dataset_name: str
-    dataset_config: str | None
-    train_split: str
-    val_split: str
-    test_split: str | None
-    task_type: str
+    glue_dir_name: str
+    train_file: str
+    validation_file: str
+    test_file: str
     main_metric: str
+    selection_metric: str
+    selection_mode: str
     formatter: Formatter
-    candidates: dict[str, str] | None = None
+    candidates: dict[str, str]
+    submission_name: str
+    submission_labels: dict[str, str]
+    add_eos_to_target: bool = False
+    score_normalization: str = "mean_token_logprob"
+    evaluation_protocol: str = "decoder_lm_verbalized_classification"
+    prompt_template: str = "Sentence: {sentence}\\nSentiment:"
 
 
-def _sst2(example: Mapping[str, Any]) -> tuple[str, str]:
+def _sst2(example: Mapping[str, Any]) -> tuple[str, str | None]:
     prompt = f"Sentence: {example['sentence']}\nSentiment:"
+
+    if "label" not in example or example["label"] is None:
+        return prompt, None
+
     label = int(example["label"])
-    return prompt, {0: " negative", 1: " positive"}[label]
+    if label < 0:
+        return prompt, None
+
+    return prompt, {0: " negative", 1: " positive"}.get(label)
 
 
-def _boolq(example: Mapping[str, Any]) -> tuple[str, str]:
-    prompt = f"Passage: {example['passage']}\nQuestion: {example['question']}\nAnswer:"
-    return prompt, " yes" if bool(example["answer"]) else " no"
-
-
-def _first_present(example: Mapping[str, Any], names: tuple[str, ...]) -> str:
-    for name in names:
-        if name in example and example[name] is not None:
-            return str(example[name])
-    raise KeyError(f"None of the expected fields are present: {names}; available={sorted(example)}")
-
-
-def _e2e(example: Mapping[str, Any]) -> tuple[str, str]:
-    mr = _first_present(example, ("meaning_representation", "meaning_representation_src", "mr"))
-    ref = _first_present(example, ("human_reference", "reference", "target", "text", "ref"))
-    return f"Meaning representation: {mr}\nDescription:", f" {ref.strip()}"
-
-
-TASKS: dict[str, TaskSpec] = {
-    "sst2": TaskSpec(
+TASKS: dict[str, GlueTaskSpec] = {
+    "sst2": GlueTaskSpec(
         name="sst2",
-        dataset_name="nyu-mll/glue",
-        dataset_config="sst2",
-        train_split="train",
-        val_split="validation",
-        test_split="test",
-        task_type="classification",
+        glue_dir_name="SST-2",
+        train_file="train.tsv",
+        validation_file="dev.tsv",
+        test_file="test.tsv",
         main_metric="accuracy",
+        selection_metric="accuracy",
+        selection_mode="max",
         formatter=_sst2,
         candidates={"negative": " negative", "positive": " positive"},
-    ),
-    "boolq": TaskSpec(
-        name="boolq",
-        dataset_name="google/boolq",
-        dataset_config=None,
-        train_split="train",
-        val_split="validation",
-        test_split=None,
-        task_type="classification",
-        main_metric="accuracy",
-        formatter=_boolq,
-        candidates={"no": " no", "yes": " yes"},
-    ),
-    "e2e_nlg": TaskSpec(
-        name="e2e_nlg",
-        dataset_name="tuetschek/e2e_nlg",
-        dataset_config=None,
-        train_split="train",
-        val_split="validation",
-        test_split="test",
-        task_type="generation",
-        main_metric="loss",
-        formatter=_e2e,
+        submission_name="SST-2",
+        submission_labels={"negative": "negative", "positive": "positive"},
+        add_eos_to_target=False,
+        score_normalization="mean_token_logprob",
     ),
 }
 
 
-def get_task(name: str) -> TaskSpec:
+def get_task(name: str) -> GlueTaskSpec:
     try:
         return TASKS[name]
     except KeyError as exc:
         raise ValueError(f"Unknown task={name!r}; choices={sorted(TASKS)}") from exc
+
+
+def format_example(task: GlueTaskSpec, example: Mapping[str, Any]) -> dict[str, Any]:
+    prompt, target = task.formatter(example)
+    return {"prompt": prompt, "target": target}
