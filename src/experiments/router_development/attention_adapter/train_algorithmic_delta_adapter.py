@@ -17,7 +17,6 @@ from experiments.router_development.attention_adapter.adapters.algorithmic_delta
     parse_int_csv,
 )
 from experiments.router_development.attention_adapter.data import load_adapter_finetune_data
-from experiments.router_development.attention_adapter.eval import eval_baseline, eval_wrapped
 from experiments.router_development.attention_adapter.models import DEFAULT_FAMILY_SPECS
 from experiments.router_development.attention_adapter.trainer import (
     TrainableParameters,
@@ -25,7 +24,7 @@ from experiments.router_development.attention_adapter.trainer import (
     parse_layer_indices,
     train_one_epoch,
 )
-from experiments.router_development.attention_adapter.utils import set_seed
+from experiments.router_development.attention_adapter.utils import lm_loss, set_seed
 
 
 @dataclass
@@ -79,6 +78,72 @@ class AlgorithmicDeltaFineTuneConfig(LearnerHyperParams):
 
 def relative_ppl_reduction(delta_nll: float) -> float:
     return float(1.0 - math.exp(-delta_nll))
+
+
+@torch.no_grad()
+def eval_baseline_with_progress(
+    model: torch.nn.Module,
+    chunks: torch.Tensor,
+    batch_size: int,
+    device: torch.device,
+    *,
+    label: str,
+    progress_every: int = 25,
+) -> float:
+    model.eval()
+    losses: list[float] = []
+    n_examples = chunks.shape[0]
+    n_batches = math.ceil(n_examples / batch_size)
+    print(f"[eval:{label}] baseline start chunks={n_examples} batches={n_batches}")
+    for batch_idx, start in enumerate(range(0, n_examples, batch_size), start=1):
+        input_ids = chunks[start : start + batch_size].to(device)
+        logits = model(input_ids).logits
+        loss = lm_loss(logits, input_ids)
+        losses.append(float(loss.item()) * input_ids.shape[0])
+        if batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == n_batches:
+            print(f"[eval:{label}] baseline batch {batch_idx}/{n_batches}")
+    out = sum(losses) / max(1, n_examples)
+    print(f"[eval:{label}] baseline done loss={out:.6f}")
+    return out
+
+
+@torch.no_grad()
+def eval_wrapped_with_progress(
+    wrapped: GPT2AlgorithmicDeltaAdapter,
+    chunks: torch.Tensor,
+    batch_size: int,
+    *,
+    label: str,
+    collect_stats: bool = True,
+    progress_every: int = 25,
+) -> Dict[str, float]:
+    wrapped.set_peft_eval_mode()
+    losses: list[float] = []
+    stats_accum: Dict[str, float] = {}
+    n_stats_batches = 0
+    n_examples = chunks.shape[0]
+    n_batches = math.ceil(n_examples / batch_size)
+    stats_text = " with stats" if collect_stats else ""
+    print(f"[eval:{label}] wrapped start chunks={n_examples} batches={n_batches}{stats_text}")
+    for batch_idx, start in enumerate(range(0, n_examples, batch_size), start=1):
+        input_ids = chunks[start : start + batch_size].to(wrapped.device)
+        logits = wrapped(input_ids)
+        loss = lm_loss(logits, input_ids)
+        losses.append(float(loss.item()) * input_ids.shape[0])
+        if collect_stats:
+            stats = wrapped.peft_stats(input_ids)
+            for key, value in stats.items():
+                stats_accum[key] = stats_accum.get(key, 0.0) + float(value)
+            n_stats_batches += 1
+        if batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == n_batches:
+            print(f"[eval:{label}] wrapped batch {batch_idx}/{n_batches}")
+
+    out = {"loss": sum(losses) / max(1, n_examples)}
+    if collect_stats:
+        for key, value in stats_accum.items():
+            out[key] = value / max(1, n_stats_batches)
+    print(f"[eval:{label}] wrapped done loss={out['loss']:.6f}")
+    return out
 
 
 def build_wrapped_model(
@@ -140,18 +205,36 @@ def train(cfg: AlgorithmicDeltaFineTuneConfig) -> None:
             raise ValueError(f"layer_idx={layer_idx} out of range for n_layers={n_layers}")
 
     data = load_adapter_finetune_data(cfg, tokenizer)
-    baseline_train = eval_baseline(model, data.train, cfg.batch_size, device)
-    baseline_val = eval_baseline(model, data.val, cfg.batch_size, device)
-    baseline_test = eval_baseline(model, data.test, cfg.batch_size, device)
+    baseline_train = eval_baseline_with_progress(model, data.train, cfg.batch_size, device, label="train")
+    baseline_val = eval_baseline_with_progress(model, data.val, cfg.batch_size, device, label="val")
+    baseline_test = eval_baseline_with_progress(model, data.test, cfg.batch_size, device, label="test")
 
     wrapped = build_wrapped_model(model=model, cfg=cfg, layer_indices=layer_indices).to(device)
     trainable_params = [param for param in wrapped.parameters() if param.requires_grad]
     num_trainable = sum(param.numel() for param in trainable_params)
     print(f"[model] trainable_params={num_trainable}")
 
-    init_train = eval_wrapped(wrapped, data.train, cfg.batch_size, collect_stats=False)
-    init_val = eval_wrapped(wrapped, data.val, cfg.batch_size, collect_stats=True)
-    init_test = eval_wrapped(wrapped, data.test, cfg.batch_size, collect_stats=False)
+    init_train = eval_wrapped_with_progress(
+        wrapped,
+        data.train,
+        cfg.batch_size,
+        label="init_train",
+        collect_stats=False,
+    )
+    init_val = eval_wrapped_with_progress(
+        wrapped,
+        data.val,
+        cfg.batch_size,
+        label="init_val",
+        collect_stats=True,
+    )
+    init_test = eval_wrapped_with_progress(
+        wrapped,
+        data.test,
+        cfg.batch_size,
+        label="init_test",
+        collect_stats=False,
+    )
     print()
     print(
         f"[baseline] train_loss={baseline_train:.6f} "
@@ -188,7 +271,13 @@ def train(cfg: AlgorithmicDeltaFineTuneConfig) -> None:
         row: Dict[str, Any] = {"epoch": epoch, "train_loss": train_loss}
         do_eval = epoch == 1 or epoch % cfg.eval_every == 0 or epoch == cfg.epochs
         if do_eval:
-            val_metrics = eval_wrapped(wrapped, data.val, cfg.batch_size, collect_stats=True)
+            val_metrics = eval_wrapped_with_progress(
+                wrapped,
+                data.val,
+                cfg.batch_size,
+                label=f"epoch_{epoch:03d}_val",
+                collect_stats=True,
+            )
             val_loss = val_metrics["loss"]
             val_imp = baseline_val - val_loss
             row.update({f"val_{key}": value for key, value in val_metrics.items()})
@@ -196,7 +285,13 @@ def train(cfg: AlgorithmicDeltaFineTuneConfig) -> None:
             row["val_relative_ppl_reduction"] = relative_ppl_reduction(val_imp)
 
             if cfg.eval_test_during_training:
-                test_metrics = eval_wrapped(wrapped, data.test, cfg.batch_size, collect_stats=False)
+                test_metrics = eval_wrapped_with_progress(
+                    wrapped,
+                    data.test,
+                    cfg.batch_size,
+                    label=f"epoch_{epoch:03d}_test",
+                    collect_stats=False,
+                )
                 test_imp = baseline_test - test_metrics["loss"]
                 row["test_loss_exploratory"] = test_metrics["loss"]
                 row["test_improvement_exploratory"] = test_imp
@@ -236,9 +331,27 @@ def train(cfg: AlgorithmicDeltaFineTuneConfig) -> None:
         }
     scope.load_trainable_state_dict(wrapped, best_state["trainable_state_dict"])
 
-    best_train_metrics = eval_wrapped(wrapped, data.train, cfg.batch_size, collect_stats=False)
-    best_val_metrics = eval_wrapped(wrapped, data.val, cfg.batch_size, collect_stats=True)
-    best_test_metrics = eval_wrapped(wrapped, data.test, cfg.batch_size, collect_stats=True)
+    best_train_metrics = eval_wrapped_with_progress(
+        wrapped,
+        data.train,
+        cfg.batch_size,
+        label="best_train",
+        collect_stats=False,
+    )
+    best_val_metrics = eval_wrapped_with_progress(
+        wrapped,
+        data.val,
+        cfg.batch_size,
+        label="best_val",
+        collect_stats=True,
+    )
+    best_test_metrics = eval_wrapped_with_progress(
+        wrapped,
+        data.test,
+        cfg.batch_size,
+        label="best_test",
+        collect_stats=True,
+    )
     train_imp = baseline_train - best_train_metrics["loss"]
     val_imp = baseline_val - best_val_metrics["loss"]
     test_imp = baseline_test - best_test_metrics["loss"]

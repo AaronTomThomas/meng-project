@@ -205,7 +205,7 @@ def train_one_epoch(
         if total_examples < cfg.batch_size * 10:
             print_every = 1
         else:
-            print_every = 10
+            print_every = 50
         
         if (start // cfg.batch_size) % print_every == 0:
             print(
