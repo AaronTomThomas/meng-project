@@ -201,6 +201,20 @@ def train_one_epoch(
         if epoch == 1 and total_examples == 0:
             scope.assert_frozen_unchanged(wrapped)
 
+        #print every 1 step for the first 10 steps, then every 10 steps
+        if total_examples < cfg.batch_size * 10:
+            print_every = 1
+        else:
+            print_every = 10
+        
+        if (start // cfg.batch_size) % print_every == 0:
+            print(
+                f"[epoch {epoch:03d}] step={start // cfg.batch_size:04d} "
+                f"loss={loss.item():.6f} "
+                f"avg_loss={total_loss / max(1, total_examples):.6f} "
+                f"examples={total_examples}"
+            )
+
         total_loss += float(loss.item()) * input_ids.shape[0]
         total_examples += input_ids.shape[0]
 
