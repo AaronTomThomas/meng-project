@@ -81,7 +81,6 @@ class RouterDatasetBuilder:
         q: torch.Tensor,
         Kctx: torch.Tensor,
         k_top: int,
-        beta_soft: float,
     ):
         qn = F.normalize(q, dim=-1)
         Kn = F.normalize(Kctx, dim=-1)
@@ -90,8 +89,8 @@ class RouterDatasetBuilder:
         k_eff = min(k_top, Kctx.shape[1])
         top_vals, top_idx = torch.topk(sims, k=k_eff, dim=-1)
 
-        soft_w = F.softmax(beta_soft * sims, dim=-1)
-        top_soft_w = F.softmax(beta_soft * top_vals, dim=-1)
+        soft_w = F.softmax(sims, dim=-1)
+        top_soft_w = F.softmax(top_vals, dim=-1)
 
         return sims, top_vals, top_idx, soft_w, top_soft_w
 
@@ -125,8 +124,7 @@ class RouterDatasetBuilder:
         k_feat = min(max(cfg.k_linear_local, cfg.k_sharp, cfg.k_knn_mean, 4), n)
 
         sims, top_vals, top_idx, soft_w, top_soft_w = self._topk_cosine_stats(
-            q, Kctx, k_feat, cfg.beta_soft
-        )
+            q, Kctx, k_feat)
 
         K_top = Kctx.gather(
             dim=1,
@@ -188,7 +186,7 @@ class RouterDatasetBuilder:
         qn = F.normalize(q, dim=-1)
         Kn_win = F.normalize(K_win, dim=-1)
         win_scores = torch.einsum("bd,bwd->bw", qn, Kn_win)
-        win_weights = F.softmax(cfg.beta_soft * win_scores, dim=-1)
+        win_weights = F.softmax(win_scores, dim=-1)
 
         window_entropy = -(win_weights * win_weights.clamp_min(1e-8).log()).sum(dim=-1)
         mean_window_sim = win_scores.mean(dim=-1)

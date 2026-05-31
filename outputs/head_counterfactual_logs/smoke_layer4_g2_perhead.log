@@ -1,0 +1,132 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[config]
+  local_kernel_beta: 1.0
+  window_size: 16
+  k_knn_mean: 4
+  ridge_lambda: 0.1
+  k_linear_local: 16
+  k_sharp: 2
+  model_name: openai-community/gpt2
+  dataset_name: wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: validation
+  text_field: text
+  max_texts: 50
+  block_size: 96
+  batch_size: 2
+  max_chunks: 4
+  layer_idx: 4
+  head_indices: all
+  min_context: 16
+  position_stride: 16
+  replace_mode: multi_head_single_pos_per_head
+  head_group_size: 2
+  head_group_strategy: contiguous
+  manual_head_groups: 
+  max_head_groups: 1
+  save_results: True
+  output_dir: outputs/head_counterfactual_results/smoke
+  cache_dir: outputs/head_counterfactual_cache/smoke
+  seed: 0
+  device: cuda
+[setup] loading tokenizer/model
+Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 2542.29it/s]
+[setup] loading and packing text
+[data] loading dataset...
+Generating test split:   0%|          | 0/4358 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 4358/4358 [00:00<00:00, 147199.38 examples/s]
+Generating train split:   0%|          | 0/36718 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 36718/36718 [00:00<00:00, 1223885.87 examples/s]
+Generating validation split:   0%|          | 0/3760 [00:00<?, ? examples/s]Generating validation split: 100%|██████████| 3760/3760 [00:00<00:00, 768884.16 examples/s]
+[data] tokenizing and packing texts...
+[data] packed 4 chunks from 50 texts
+[cache-build] extracting block tensors...
+[cache-build] batch 1/2 chunks 0..1
+[cache-build] batch 2/2 chunks 2..3
+[cache] saved block tensors to outputs/head_counterfactual_cache/smoke/2a54f73901__layer4__block_tensors.pt
+[setup] total chunks=4, layer=4, mode=multi_head_single_pos_per_head
+[setup] selected heads=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[setup] intervention units=[[0, 1]]
+[setup] candidate assignments=16
+[noop-check] reconstructed teacher logits
+  max_abs_logit_diff: 2.28881836e-04
+  mean_abs_logit_diff: 1.84694218e-05
+[noop-check] explicit soft learner replacement
+  max_abs_z_diff: 4.76837158e-07
+  mean_abs_z_diff: 5.68939451e-10
+  max_abs_logit_diff: 1.52587891e-04
+  mean_abs_logit_diff: 9.24855976e-06
+Chunk 0: evaluating heads [0, 1]
+[bench] chunk 1/4 examples so far=1
+Chunk 1: evaluating heads [0, 1]
+Chunk 2: evaluating heads [0, 1]
+Chunk 3: evaluating heads [0, 1]
+[bench] chunk 4/4 examples so far=4
+
+=== No-op checks ===
+Reconstructed teacher logits:
+  max_abs_logit_diff               2.28881836e-04
+  mean_abs_logit_diff              1.84694218e-05
+Explicit soft learner replacement:
+  max_abs_z_diff                   4.76837158e-07
+  mean_abs_z_diff                  5.68939451e-10
+  max_abs_logit_diff               1.52587891e-04
+  mean_abs_logit_diff              9.24855976e-06
+
+=== Baseline ===
+  teacher_loss                     3.094849
+
+=== Sequence-level fixed assignment benchmark ===
+  soft+soft                        3.094849
+  soft+sharp                       3.089541
+  soft+window_soft                 3.093900
+  soft+local_linear_attention      3.096608
+  sharp+soft                       3.095631
+  sharp+sharp                      3.090107
+  sharp+window_soft                3.094637
+  sharp+local_linear_attention     3.097679
+  window_soft+soft                 3.095190
+  window_soft+sharp                3.089937
+  window_soft+window_soft          3.094470
+  window_soft+local_linear_attention 3.096424
+  local_linear_attention+soft      3.091100
+  local_linear_attention+sharp     3.086732
+  local_linear_attention+window_soft 3.089858
+  local_linear_attention+local_linear_attention 3.092469
+  best_fixed                       3.086732 (local_linear_attention+sharp)
+
+=== Sequence-level heterogeneous selectors ===
+  local_then_joint                 3.071051
+  greedy_suffix_oracle             3.070525
+
+=== Gaps vs teacher ===
+  best_fixed_minus_teacher         -0.008117
+  local_joint_minus_teacher        -0.023798
+  greedy_minus_teacher             -0.024324
+
+=== Gaps vs best fixed ===
+  local_then_joint_gap             0.015681
+  greedy_suffix_gap                0.016207
+
+=== Best fixed assignment winner fractions across examples ===
+  soft+soft                        0.000
+  soft+sharp                       0.000
+  soft+window_soft                 0.000
+  soft+local_linear_attention      0.000
+  sharp+soft                       0.000
+  sharp+sharp                      0.000
+  sharp+window_soft                0.250
+  sharp+local_linear_attention     0.000
+  window_soft+soft                 0.000
+  window_soft+sharp                0.000
+  window_soft+window_soft          0.250
+  window_soft+local_linear_attention 0.000
+  local_linear_attention+soft      0.000
+  local_linear_attention+sharp     0.500
+  local_linear_attention+window_soft 0.000
+  local_linear_attention+local_linear_attention 0.000
+
+=== Best fixed assignment winner fractions by unit ===
+  group=0,1          soft+soft:0.00  soft+sharp:0.00  soft+window_soft:0.00  soft+local_linear_attention:0.00  sharp+soft:0.00  sharp+sharp:0.00  sharp+window_soft:0.25  sharp+local_linear_attention:0.00  window_soft+soft:0.00  window_soft+sharp:0.00  window_soft+window_soft:0.25  window_soft+local_linear_attention:0.00  local_linear_attention+soft:0.00  local_linear_attention+sharp:0.50  local_linear_attention+window_soft:0.00  local_linear_attention+local_linear_attention:0.00
+
+[save]
+  raw:     outputs/head_counterfactual_results/smoke/layer4__multi_head_single_pos_per_head__g2__stride16__chunks4__seed0__raw.pt
+  summary: outputs/head_counterfactual_results/smoke/layer4__multi_head_single_pos_per_head__g2__stride16__chunks4__seed0__summary.json

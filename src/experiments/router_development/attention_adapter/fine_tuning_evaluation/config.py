@@ -7,7 +7,7 @@ import torch
 
 
 MethodName = Literal["zero_shot", "full_finetune", "akaza_freez", "lora", "loreft", "reft"]
-TaskName = Literal["sst2"]
+TaskName = Literal["sst2", "rte"]
 
 
 @dataclass

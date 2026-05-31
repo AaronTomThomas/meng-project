@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 @dataclass
 class LearnerHyperParams:
-    beta_soft: float = 6.0
+    local_kernel_beta: float = 1.0    
     window_size: int = 16
     k_knn_mean: int = 4
     ridge_lambda: float = 1e-1
@@ -177,6 +177,64 @@ class GlobalLinearRidgeLearner(BaseAttentionLearner):
         return yhat
 
 
+class LocalLinearAttentionLearner(BaseAttentionLearner):
+    """
+    Direct single-query Local Linear Attention readout.
+
+    Kctx and Vctx are assumed to contain only the valid context for q.
+    """
+
+    name = "local_linear_attention"
+
+    @torch.no_grad()
+    def predict(self, q, Kctx, Vctx, cfg):
+        B, n, d = Kctx.shape
+        dv = Vctx.shape[-1]
+
+        if q.shape != (B, d):
+            raise ValueError(f"expected q shape {(B, d)}, got {tuple(q.shape)}")
+
+        if Vctx.shape != (B, n, dv):
+            raise ValueError(f"expected Vctx shape {(B, n, dv)}, got {tuple(Vctx.shape)}")
+
+        qk_scale = getattr(cfg, "qk_scale", d ** -0.5)
+        ridge_lambda = cfg.ridge_lambda
+        delta_eps = getattr(cfg, "delta_eps", 1e-8)
+
+        scores = torch.matmul(Kctx, q.unsqueeze(-1)).squeeze(-1)
+        scores = scores * qk_scale
+
+        scores_max = scores.max(dim=-1, keepdim=True).values
+        W = torch.exp(scores - scores_max)
+
+        omega = W.sum(dim=-1, keepdim=True)
+
+        X = Kctx - q.unsqueeze(1)
+
+        sigma = torch.matmul(X.transpose(1, 2), W.unsqueeze(-1) * X)
+
+        mu = (W.unsqueeze(-1) * X).sum(dim=1)
+
+        eye = torch.eye(d, device=Kctx.device, dtype=Kctx.dtype).unsqueeze(0)
+        ridge = ridge_lambda * omega.unsqueeze(-1) * eye
+
+        rho = torch.linalg.solve(
+            (sigma + ridge).to(torch.float32),
+            mu.unsqueeze(-1).to(torch.float32),
+        ).squeeze(-1).to(Kctx.dtype)
+
+        denom = omega - (mu * rho).sum(dim=-1, keepdim=True)
+        denom = denom + delta_eps * torch.sign(denom)
+
+        numer = 1.0 - torch.einsum("bd,bnd->bn", rho, X)
+
+        S = W * numer / denom
+
+        yhat = torch.matmul(S.unsqueeze(1), Vctx).squeeze(1)
+
+        return yhat
+    
+
 class WeightedLocalLinearLearner(BaseAttentionLearner):
     name = "weighted_linear"
 
@@ -184,7 +242,7 @@ class WeightedLocalLinearLearner(BaseAttentionLearner):
     def predict(self, q, Kctx, Vctx, cfg):
         k_top = cfg.k_linear_local
         ridge_lambda = cfg.ridge_lambda
-        beta = cfg.beta_soft
+        beta = cfg.local_kernel_beta
         B, n, d = Kctx.shape
         dv = Vctx.shape[-1]
         k_eff = min(k_top, n)
@@ -238,6 +296,7 @@ _LEARNER_CLASS_LIST: List[Type[BaseAttentionLearner]] = [
     KNNMeanLearner,
     LinearAttentionLearner,
     WeightedLocalLinearLearner,
+    LocalLinearAttentionLearner,
 ]
 
 LEARNER_CLASSES: Dict[str, Type[BaseAttentionLearner]] = {

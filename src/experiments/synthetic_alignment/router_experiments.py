@@ -256,7 +256,7 @@ def report_router_result(title: str, result: Dict[str, object]) -> None:
 
 if __name__ == "__main__":
 
-    ROUTER_LEARNERS: List[str] = ["soft", "sharp", "window_soft", "weighted_linear"]
+    ROUTER_LEARNERS: List[str] = ["soft", "sharp", "window_soft", "local_linear_attention"]
 
 
     cfg = RouterExperimentConfig(
@@ -265,7 +265,6 @@ if __name__ == "__main__":
         dv=16,
         batch_size=128,
         sigma=0.05,
-        beta_soft=6.0,
         k_sharp=4,
         k_linear_local=16,
         ridge_lambda=1e-1,
@@ -275,7 +274,7 @@ if __name__ == "__main__":
     router_out_logistic = run_router_experiment(
         cfg,
         router_mode="logistic",
-        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local", "shifted_local_map"],
+        task_names=["piecewise_linear", "smooth_nonlinear_local", "shifted_local_map"],
         learners=ROUTER_LEARNERS,
         n_batches_per_task=8,
         seed=0,
@@ -284,7 +283,7 @@ if __name__ == "__main__":
     router_out_loss_mlp = run_router_experiment(
         cfg,
         router_mode="loss_mlp",
-        task_names=["piecewise_linear", "prototype_lookup", "smooth_nonlinear_local", "shifted_local_map"],
+        task_names=["piecewise_linear", "smooth_nonlinear_local", "shifted_local_map"],
         learners=ROUTER_LEARNERS,
         n_batches_per_task=8,
         seed=0,

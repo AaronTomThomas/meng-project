@@ -1,6 +1,6 @@
 """Download official GLUE data.
 
-Only SST-2 is active for the downstream evaluation suite right now. The
+SST-2 and RTE are active for the downstream evaluation suite right now. The
 disabled mappings below are kept as TODOs so additional GLUE tasks can be
 re-enabled one at a time later.
 """
@@ -19,6 +19,7 @@ import zipfile
 
 TASKS = [
     "SST",
+    "RTE",
     # TODO: re-enable GLUE tasks as the evaluation suite grows.
     # "CoLA",
     # "MRPC",
@@ -26,7 +27,6 @@ TASKS = [
     # "STS",
     # "MNLI",
     # "QNLI",
-    # "RTE",
     # "WNLI",
     # "diagnostic",
 ]
@@ -34,17 +34,18 @@ TASKS = [
 TASK_ALIASES = {
     "sst2": "SST",
     "SST-2": "SST",
+    "rte": "RTE",
 }
 
 TASK2PATH = {
     "SST": "https://dl.fbaipublicfiles.com/glue/data/SST-2.zip",
+    "RTE": "https://dl.fbaipublicfiles.com/glue/data/RTE.zip",
     # TODO: future GLUE tasks, currently unsupported by fine_tuning_evaluation.
     # "CoLA": "https://dl.fbaipublicfiles.com/glue/data/CoLA.zip",
     # "QQP": "https://dl.fbaipublicfiles.com/glue/data/QQP-clean.zip",
     # "STS": "https://dl.fbaipublicfiles.com/glue/data/STS-B.zip",
     # "MNLI": "https://dl.fbaipublicfiles.com/glue/data/MNLI.zip",
     # "QNLI": "https://dl.fbaipublicfiles.com/glue/data/QNLIv2.zip",
-    # "RTE": "https://dl.fbaipublicfiles.com/glue/data/RTE.zip",
     # "WNLI": "https://dl.fbaipublicfiles.com/glue/data/WNLI.zip",
     # "diagnostic": "https://dl.fbaipublicfiles.com/glue/data/AX.tsv",
 }
@@ -72,8 +73,17 @@ def sst2_dir(data_dir: str | Path) -> Path:
     return Path(data_dir) / "SST-2"
 
 
+def rte_dir(data_dir: str | Path) -> Path:
+    return Path(data_dir) / "RTE"
+
+
 def sst2_files_exist(data_dir: str | Path) -> bool:
     task_dir = sst2_dir(data_dir)
+    return all((task_dir / name).is_file() for name in ("train.tsv", "dev.tsv", "test.tsv"))
+
+
+def rte_files_exist(data_dir: str | Path) -> bool:
+    task_dir = rte_dir(data_dir)
     return all((task_dir / name).is_file() for name in ("train.tsv", "dev.tsv", "test.tsv"))
 
 
@@ -95,6 +105,21 @@ def ensure_sst2(data_dir: str | Path) -> Path:
     if not sst2_files_exist(data_dir):
         download_and_extract("SST", data_dir)
     return sst2_dir(data_dir)
+
+
+def ensure_rte(data_dir: str | Path) -> Path:
+    if not rte_files_exist(data_dir):
+        download_and_extract("RTE", data_dir)
+    return rte_dir(data_dir)
+
+
+def ensure_glue_task(data_dir: str | Path, task: str) -> Path:
+    canonical = canonical_task(task)
+    if canonical == "SST":
+        return ensure_sst2(data_dir)
+    if canonical == "RTE":
+        return ensure_rte(data_dir)
+    raise ValueError(f"Task {canonical!r} is not active; active tasks={TASKS}")
 
 
 def format_mrpc(data_dir: str, path_to_data: str) -> None:

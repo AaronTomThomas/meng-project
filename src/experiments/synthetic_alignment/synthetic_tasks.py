@@ -75,38 +75,38 @@ def generate_piecewise_linear(
         "V": V,
     }
 
-@torch.no_grad()
-def generate_prototype_lookup(
-    cfg: EvalConfig, 
-    n_proto: int = 32, 
-    proto_spread: float= 6.0, 
-    key_noise: float = 0.25,
-) -> Dict:
-    """
-    Retrieval-like task:
-    keys cluster around prototypes (stored cluster center in input space), values are artbitrary labels.
-    """
+# @torch.no_grad()
+# def generate_prototype_lookup(
+#     cfg: EvalConfig, 
+#     n_proto: int = 32, 
+#     proto_spread: float= 6.0, 
+#     key_noise: float = 0.25,
+# ) -> Dict:
+#     """
+#     Retrieval-like task:
+#     keys cluster around prototypes (stored cluster center in input space), values are artbitrary labels.
+#     """
 
-    centers = proto_spread * _randn(cfg.batch_size, n_proto, cfg.d, cfg=cfg)
-    proto_values = torch.sign(_randn(cfg.batch_size, n_proto, cfg.dv, cfg=cfg))
+#     centers = proto_spread * _randn(cfg.batch_size, n_proto, cfg.d, cfg=cfg)
+#     proto_values = torch.sign(_randn(cfg.batch_size, n_proto, cfg.dv, cfg=cfg))
 
-    proto_id = torch.randint(0, n_proto, (cfg.batch_size, cfg.L), device=cfg.device)
+#     proto_id = torch.randint(0, n_proto, (cfg.batch_size, cfg.L), device=cfg.device)
 
-    K = centers.gather(
-        dim=1, 
-        index=proto_id[:, :, None].expand(cfg.batch_size, cfg.L, cfg.d)
-    )
-    K = K + key_noise * _randn(cfg.batch_size, cfg.L, cfg.d, cfg=cfg)
+#     K = centers.gather(
+#         dim=1, 
+#         index=proto_id[:, :, None].expand(cfg.batch_size, cfg.L, cfg.d)
+#     )
+#     K = K + key_noise * _randn(cfg.batch_size, cfg.L, cfg.d, cfg=cfg)
 
-    V_clean = proto_values.gather(
-        dim=1, 
-        index=proto_id[:, :, None].expand(cfg.batch_size, cfg.L, cfg.dv)
-    )
-    V = V_clean + cfg.sigma * _randn(cfg.batch_size, cfg.L, cfg.dv, cfg=cfg)
-    return {
-        "K": K,
-        "V": V,
-    }
+#     V_clean = proto_values.gather(
+#         dim=1, 
+#         index=proto_id[:, :, None].expand(cfg.batch_size, cfg.L, cfg.dv)
+#     )
+#     V = V_clean + cfg.sigma * _randn(cfg.batch_size, cfg.L, cfg.dv, cfg=cfg)
+#     return {
+#         "K": K,
+#         "V": V,
+#     }
 
 def generate_smooth_nonlinear_local(
     cfg: EvalConfig, 
@@ -221,7 +221,7 @@ def generate_support_query_shifted_local_map(
 
 TASKS = [
     Task("piecewise_linear", generate_piecewise_linear),
-    Task("prototype_lookup", generate_prototype_lookup),
+    # Task("prototype_lookup", generate_prototype_lookup),
     Task("smooth_nonlinear_local", generate_smooth_nonlinear_local),
     Task("shifted_local_map", generate_support_query_shifted_local_map)
 ]

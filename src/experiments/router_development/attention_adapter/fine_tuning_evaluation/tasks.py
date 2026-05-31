@@ -40,6 +40,25 @@ def _sst2(example: Mapping[str, Any]) -> tuple[str, str | None]:
     return prompt, {0: " negative", 1: " positive"}.get(label)
 
 
+def _rte(example: Mapping[str, Any]) -> tuple[str, str | None]:
+    prompt = f"Premise: {example['sentence1']}\nHypothesis: {example['sentence2']}\nEntailment:"
+
+    label = example.get("label")
+    if label is None:
+        return prompt, None
+
+    label_text = str(label).strip()
+    if label_text in {"", "-1"}:
+        return prompt, None
+
+    return prompt, {
+        "0": " entailment",
+        "1": " not_entailment",
+        "entailment": " entailment",
+        "not_entailment": " not_entailment",
+    }.get(label_text)
+
+
 TASKS: dict[str, GlueTaskSpec] = {
     "sst2": GlueTaskSpec(
         name="sst2",
@@ -56,6 +75,23 @@ TASKS: dict[str, GlueTaskSpec] = {
         submission_labels={"negative": "negative", "positive": "positive"},
         add_eos_to_target=False,
         score_normalization="mean_token_logprob",
+    ),
+    "rte": GlueTaskSpec(
+        name="rte",
+        glue_dir_name="RTE",
+        train_file="train.tsv",
+        validation_file="dev.tsv",
+        test_file="test.tsv",
+        main_metric="accuracy",
+        selection_metric="accuracy",
+        selection_mode="max",
+        formatter=_rte,
+        candidates={"entailment": " entailment", "not_entailment": " not_entailment"},
+        submission_name="RTE",
+        submission_labels={"entailment": "entailment", "not_entailment": "not_entailment"},
+        add_eos_to_target=False,
+        score_normalization="mean_token_logprob",
+        prompt_template="Premise: {sentence1}\\nHypothesis: {sentence2}\\nEntailment:",
     ),
 }
 

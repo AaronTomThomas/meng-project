@@ -1,0 +1,303 @@
+\chapter{TTR Learners as Alternative Readouts}\label{chap:ttr_learners}
+
+The previous chapter motivated the attention output \(z_t\) as the result of an inference-time readout from a learned query-key-value geometry. Under the Test-Time Regression (TTR) view, the query \(q_t\) is treated as an evaluation point, the preceding keys \(K_{<t}\) define input examples, and the values \(V_{<t}\) define the corresponding targets. Standard softmax attention is then one particular readout rule: a local constant estimate obtained by weighting previous values according to query-key similarity. This chapter makes that design space explicit.
+
+The goal of this chapter is deliberately narrower than the final fine-tuning objective of the thesis. I do not yet ask whether replacing softmax attention improves a pretrained language model. Instead, I ask a controlled question:
+
+\begin{quote}
+Given the same key-value context, do different TTR-style readout rules make systematically different predictions, and is the best readout query-dependent?
+\end{quote}
+
+This question is important because the later method relies on the idea that alternative readouts can expose meaningful directions in attention-output space. If all plausible readouts behaved identically, or if one readout dominated uniformly, then there would be little motivation for learner-specific correction directions. Conversely, if different readouts are useful in different regimes, then the softmax readout is better understood as one point in a larger family of inference-time learners.
+
+\section{Alternative Readout Rules}\label{sec:alternative_readout_rules}
+
+Let \(q \in \mathbb{R}^{d}\) be a query, \(K \in \mathbb{R}^{n \times d}\) be the matrix of context keys, and \(V \in \mathbb{R}^{n \times d_v}\) be the matrix of context values. Each readout rule considered in this chapter maps
+\[
+(q, K, V) \mapsto \hat v(q) \in \mathbb{R}^{d_v}.
+\]
+The rules differ only in how they use the same context. This isolates the effect of the readout mechanism from the effect of learning different key or value representations.
+
+\paragraph{Softmax readout.}
+The baseline learner is standard scaled dot-product softmax attention:
+\[
+s_i = \frac{k_i^\top q}{\sqrt{d}},
+\qquad
+\alpha_i = \frac{\exp(s_i)}{\sum_{j=1}^{n}\exp(s_j)},
+\qquad
+\hat v_{\mathrm{soft}}(q) = \sum_{i=1}^{n}\alpha_i v_i .
+\]
+As discussed in Chapter~\ref{chap:background}, this has the form of a Nadaraya-Watson or local constant kernel smoother~\cite{tsai2019transformer,wang2025test}. It assumes that the target near the query can be approximated by a weighted average of nearby values.
+
+\paragraph{Top-\(k\) softmax readout.}
+The sharp learner restricts attention to the \(k_{\mathrm{sharp}}\) highest-scoring keys before applying softmax:
+\[
+\mathcal{N}_k(q) = \operatorname{TopK}_{k_{\mathrm{sharp}}}
+\left(\frac{k_i^\top q}{\sqrt{d}}\right),
+\qquad
+\hat v_{\mathrm{sharp}}(q)
+=
+\sum_{i \in \mathcal{N}_k(q)}
+\alpha_i^{(k)} v_i .
+\]
+This readout tests a sparse-neighbourhood assumption: only a small number of highly similar examples should determine the prediction.
+
+\paragraph{Windowed softmax readout.}
+The windowed learner applies the same softmax rule, but only over the most recent \(w\) context tokens:
+\[
+\hat v_{\mathrm{window}}(q)
+=
+\operatorname{Softmax}\left(\frac{K_{n-w:n}q}{\sqrt{d}}\right){}^\top V_{n-w:n}.
+\]
+This tests a recency-biased assumption. It is useful in settings where the active local rule changes over time, so distant context may be less relevant than recent context.
+
+\paragraph{Similarity \(k\)-nearest-neighbour mean.}
+The \(k\)-nearest-neighbour learner selects the top \(k_{\mathrm{knn}}\) keys by scaled dot-product similarity and averages their values uniformly:
+\[
+\hat v_{\mathrm{knn}}(q)
+=
+\frac{1}{k_{\mathrm{knn}}}
+\sum_{i \in \mathcal{N}_k(q)} v_i .
+\]
+This is another local constant estimator, but unlike softmax it does not use a graded weighting within the selected neighbourhood.
+
+\paragraph{Feature-map linear attention.}
+The linear-attention learner uses a positive feature map \(\phi(x)=\operatorname{ELU}(x)+1\) and computes
+\[
+\hat v_{\mathrm{linattn}}(q)
+=
+\frac{
+\phi(q){}^\top \sum_{i=1}^{n}\phi(k_i)v_i^\top
+}{
+\phi(q){}^\top \sum_{i=1}^{n}\phi(k_i)
+}.
+\]
+This is included because linear attention is a canonical alternative attention mechanism~\cite{katharopoulos2020transformers}. It should not be confused with linear regression. It is a kernelized attention rule whose factorisation changes how context is aggregated.
+
+\paragraph{Global linear ridge readout.}
+The global linear learner fits a ridge-regression map from keys to values using all context examples:
+\[
+\theta^*
+=
+\arg\min_{\theta}
+\left\lVert X\theta - V \right\rVert_F^2
++
+\lambda \left\lVert \theta \right\rVert_F^2,
+\]
+where \(X=[K ; \mathbf{1}]\) augments the keys with an intercept term. The prediction is
+\[
+\hat v_{\mathrm{global}}(q)
+=
+[q^\top ; 1]\theta^* .
+\]
+This learner represents a global parametric assumption: the entire context is explained by one linear map.
+
+\paragraph{Local Linear Attention readout.}
+Finally, I include a direct Local Linear Attention (LLA) readout. LLA is motivated by upgrading softmax attention from a local constant estimator to a local linear estimator under the TTR view~\cite{zuo2025local}. For each query, it forms query-dependent exponential kernel weights
+\[
+W_i = \exp\left(\frac{k_i^\top q}{\sqrt{d}}\right),
+\]
+and defines centred local coordinates
+\[
+x_i = k_i - q .
+\]
+The direct single-query LLA readout can be written as a set of adjusted attention weights applied to the values. In the implementation used here, I compute
+\[
+\Omega = \sum_i W_i,
+\qquad
+\Sigma = \sum_i W_i x_i x_i^\top,
+\qquad
+\mu = \sum_i W_i x_i,
+\]
+then solve the regularised system
+\[
+\rho
+=
+\left(\Sigma + \lambda \Omega I\right){}^{-1}\mu .
+\]
+The resulting value weights are
+\[
+S_i
+=
+\frac{
+W_i \left(1 - \rho^\top x_i\right)
+}{
+\Omega - \mu^\top \rho
+},
+\]
+and the readout is
+\[
+\hat v_{\mathrm{LLA}}(q)
+=
+\sum_i S_i v_i .
+\]
+This is the direct closed-form local-linear readout, not the hardware-efficient FlashLLA algorithm. In this thesis it is used as a diagnostic learner and later as a possible source of attention-output correction directions, rather than as a proposed replacement architecture.
+
+Together, these learners span several distinct readout assumptions: local constant averaging, sparse retrieval, recency restriction, kernelized linear attention, global linear regression, and local linear regression. This allows the synthetic experiments to test whether the TTR readout space is empirically meaningful rather than merely notational.
+
+\section{Synthetic KVQ Regression Tasks}\label{sec:synthetic_kvq_tasks}
+
+The synthetic experiments are designed as controlled key-value-query prediction problems. Each task produces a sequence of keys \(K \in \mathbb{R}^{B \times L \times d}\) and values \(V \in \mathbb{R}^{B \times L \times d_v}\). At each valid query position \(t\), the learner receives
+\[
+q = K_t,
+\qquad
+K_{\mathrm{ctx}} = K_{<t},
+\qquad
+V_{\mathrm{ctx}} = V_{<t},
+\]
+and is evaluated against the target \(V_t\) using mean squared error:
+\[
+\ell_a(t)
+=
+\left\lVert
+\hat v_a(K_t, K_{<t}, V_{<t}) - V_t
+\right\rVert_2^2 / d_v .
+\]
+The experiments use \(L=128\), key dimension \(d=32\), value dimension \(d_v=16\), batch size \(128\), Gaussian noise standard deviation \(0.05\), and a minimum context length of \(8\). Results are averaged over five random seeds. These settings are not intended as long-context benchmarks. They are chosen to provide many query-level evaluations while keeping closed-form linear and local-linear learners computationally tractable.
+
+I use three regression-style task families.
+
+\paragraph{Piecewise linear.}
+The sequence is divided into segments of length \(16\). Each segment has its own linear map from keys to values, with independent Gaussian noise added to the values. This task follows the non-stationary piecewise-linear spirit of the Local Linear Attention setup~\cite{zuo2025local}: the active input-output relationship changes across the sequence, so a globally fitted linear rule may be inappropriate. Since the segment length matches the window size and local-linear neighbourhood size, the task tests whether recency- or locality-aware readouts can exploit the active regime.
+
+\paragraph{Shifted local map.}
+This task also uses segment-specific linear maps, but each segment consists of support tokens followed by a shifted query token. Only the final shifted query position in each segment is evaluated. This creates a controlled local extrapolation problem: the learner must use nearby support examples from the same segment to predict the value at a query displaced from the support distribution. A local constant estimator can retrieve nearby values, but a local linear estimator should be better suited to extrapolating within the segment-specific map.
+
+\paragraph{Smooth nonlinear local regression.}
+The smooth nonlinear task samples a low-dimensional latent variable, maps it nonlinearly into key space, and maps related nonlinear features into value space. This task tests whether a broader or more global readout can outperform strictly local estimators when the relationship is smooth across the context. It therefore provides a contrast to the explicitly segmented tasks.
+
+These tasks are not intended to be realistic language-modelling datasets. Their role is methodological: they isolate the readout component in a setting where the ground-truth target is known and every learner receives exactly the same key-value context.
+
+\section{Learner Heterogeneity}\label{sec:learner_heterogeneity}
+
+Table~\ref{tab:synthetic_best_fixed_oracle} summarises the best fixed learner on each task and compares it to an oracle that selects the lowest-loss learner separately for each query. A different fixed learner is preferred on each task. The windowed softmax learner is best on the piecewise-linear task, Local Linear Attention is best on the shifted local-map task, and global ridge regression is best on the smooth nonlinear task. This already indicates that the learner family is not redundant: different readout assumptions are useful in different data-generating regimes.
+
+\begin{table}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrr}
+\toprule
+Task & Best fixed learner & Best fixed MSE & Oracle MSE & Oracle gain \\
+\midrule
+\texttt{piecewise\_linear} & \texttt{window\_soft} & \(32.08 \pm 0.10\) & \(27.91 \pm 0.09\) & \(13.0 \pm 0.2\%\) \\
+\texttt{shifted\_local\_map} & \texttt{local\_linear\_attention} & \(1.008 \pm 0.042\) & \(0.863 \pm 0.034\) & \(14.3 \pm 0.8\%\) \\
+\texttt{smooth\_nonlinear\_local} & \texttt{linear\_global} & \(0.411 \pm 0.006\) & \(0.293 \pm 0.005\) & \(28.7 \pm 0.5\%\) \\
+\bottomrule
+\end{tabular}
+}
+\caption{Best fixed learner and query-wise oracle performance on synthetic TTR readout tasks. Values report mean \(\pm\) standard deviation over five random seeds. Oracle gain is measured relative to the best fixed learner for each task.}\label{tab:synthetic_best_fixed_oracle}
+\end{table}
+
+The full learner comparison in Table~\ref{tab:synthetic_full_mse} shows why this matters. On the piecewise-linear task, softmax and windowed softmax are both strong, while global linear regression performs poorly. This is consistent with the task's non-stationarity: fitting a single global map across changing segments is harmful. On the shifted local-map task, Local Linear Attention is clearly strongest among the fixed learners, matching the task's local extrapolation structure. On the smooth nonlinear task, global ridge regression is strongest, suggesting that the context contains a broad structure that can be exploited by a global linear approximation better than by sparse or purely local averaging.
+
+\begin{table}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Task & Soft & Window & Sharp & kNN & LinAttn & Global Lin. & LLA \\
+\midrule
+\texttt{piecewise\_linear} & 32.18 & \textbf{32.08} & 39.38 & 38.10 & 32.63 & 63.36 & 45.29 \\
+\texttt{shifted\_local\_map} & 1.553 & 1.400 & 1.300 & 1.308 & 1.794 & 1.534 & \textbf{1.008} \\
+\texttt{smooth\_nonlinear\_local} & 0.509 & 0.530 & 0.636 & 0.635 & 0.511 & \textbf{0.411} & 0.468 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Mean MSE of fixed readout rules on synthetic tasks. Each learner receives the same query, context keys, and context values; only the readout rule differs. Lower is better.}\label{tab:synthetic_full_mse}
+\end{table}
+
+The uniform mixture of all learner predictions is also informative. It is worse than the best fixed learner on every task: by \(4.8\%\) on the piecewise-linear task, \(23.8\%\) on the shifted local-map task, and \(15.4\%\) on the smooth nonlinear task. Thus, the oracle improvement is not obtained by naively averaging readouts. The useful combination of readout behaviours is query-dependent.
+
+This observation is reinforced by the oracle winner fractions in Table~\ref{tab:synthetic_winner_fractions}. Even when one learner is best on average, it is not the best for every query. For example, windowed softmax is the most common winner on the piecewise-linear task, but it wins only \(33.1\%\) of queries; linear attention wins \(26.4\%\), and softmax wins \(14.1\%\). On the shifted local-map task, Local Linear Attention is the dominant winner, but it still wins fewer than half of queries. On the smooth nonlinear task, global linear regression wins \(54.0\%\) of queries, leaving a substantial minority where other readouts are preferred.
+
+\begin{table}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Task & Soft & Window & Sharp & kNN & LinAttn & Global Lin. & LLA \\
+\midrule
+\texttt{piecewise\_linear} & 14.1 & \textbf{33.1} & 5.0 & 6.4 & 26.4 & 8.7 & 6.3 \\
+\texttt{shifted\_local\_map} & 1.3 & 10.5 & 15.3 & 9.6 & 2.1 & 13.7 & \textbf{47.6} \\
+\texttt{smooth\_nonlinear\_local} & 1.5 & 9.1 & 7.8 & 11.2 & 7.9 & \textbf{54.0} & 8.6 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Fraction of queries for which each learner attains the lowest MSE, averaged over five seeds and reported as percentages. The best readout varies both across task families and within each task.}\label{tab:synthetic_winner_fractions}
+\end{table}
+
+These results support a stronger conclusion than merely observing that one alternative learner can outperform softmax on a toy task. The relevant fact is the heterogeneity itself. Different readouts encode different assumptions about locality, sparsity, recency, and linearity. The best assumption changes across controlled regimes and even across individual queries within the same regime.
+
+\section{Oracle and Learned Routing}\label{sec:oracle_and_learned_routing}
+
+The query-wise oracle in the previous section is not deployable, since it uses the ground-truth target \(V_t\) to choose the best learner. However, it provides a useful upper bound on the benefit available from learner selection. The next question is whether the oracle preference contains predictable structure in the local key-value geometry.
+
+To test this, I train lightweight routers on synthetic query examples. For each valid query, I compute a feature vector from the local context, including similarity statistics, top-\(k\) gaps, entropy and effective support of local weights, local value variance, covariance and condition statistics of nearby keys, and recency features. I then compute the loss of each candidate readout and use these losses to define supervised routing targets.
+
+For computational tractability, the router action space is restricted to four representative readouts:
+\[
+\{\texttt{soft},\texttt{sharp},\texttt{window\_soft},\texttt{local\_linear\_attention}\}.
+\]
+The routing oracle and best-fixed baselines in this section are therefore computed over this reduced action set, and should not be compared numerically to the full seven-learner oracle in Table~\ref{tab:synthetic_best_fixed_oracle}. This reduced setting is sufficient for the intended diagnostic: whether broad readout preferences are predictable from local geometry features.
+
+I consider two routers. The first is a logistic winner classifier trained to predict the lowest-loss learner directly using cross-entropy. The second is a loss-aware MLP trained to predict per-learner regrets, selecting at evaluation time the learner with the lowest predicted regret. The latter objective is better aligned with routed loss, since it does not treat near-ties between learners as equally severe as large mistakes.
+
+Router performance is evaluated using the actual MSE incurred by the selected learner:
+\[
+\ell_{\mathrm{routed}}
+=
+\mathbb{E}_{t}\left[\ell_{\hat a(t)}(t)\right],
+\]
+and compared against the best fixed learner and the oracle over the same reduced action set. The fraction of oracle gap closed is
+\[
+\operatorname{GapClosed}
+=
+\frac{
+\ell_{\mathrm{best\ fixed}} - \ell_{\mathrm{routed}}
+}{
+\ell_{\mathrm{best\ fixed}} - \ell_{\mathrm{oracle}}
+}.
+\]
+A value of \(0\) means the router does no better than the best fixed learner, while \(1\) means it matches the oracle. Results are averaged over three random seeds using held-out query examples.
+
+Table~\ref{tab:synthetic_router} reports the loss-aware MLP router. It recovers a modest but consistent fraction of the oracle gap on all three tasks: \(20.8\%\) on piecewise linear regression, \(12.3\%\) on shifted local maps, and \(29.7\%\) on smooth nonlinear regression. The logistic winner classifier was substantially weaker, closing only \(11.2\%\), \(-5.0\%\), and \(2.4\%\) of the gap respectively. This difference is expected: exact winner classification is a brittle target when several learners have similar losses, whereas loss-aware routing is penalised according to the quality of the selected readout.
+
+\begin{table}[t]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrr}
+\toprule
+Task & Best fixed & Routed & Oracle & Gap closed \\
+\midrule
+\texttt{piecewise\_linear} & \(32.12 \pm 0.15\) & \(31.48 \pm 0.16\) & \(29.04 \pm 0.12\) & \(20.8 \pm 0.5\%\) \\
+\texttt{shifted\_local\_map} & \(1.011 \pm 0.040\) & \(0.996 \pm 0.041\) & \(0.888 \pm 0.031\) & \(12.3 \pm 2.7\%\) \\
+\texttt{smooth\_nonlinear\_local} & \(0.471 \pm 0.003\) & \(0.444 \pm 0.004\) & \(0.381 \pm 0.004\) & \(29.7 \pm 1.2\%\) \\
+\bottomrule
+\end{tabular}
+}
+\caption{Loss-aware MLP routing over a reduced four-learner action set. The router recovers part, but far from all, of the oracle learner-selection gap. Values report mean \(\pm\) standard deviation over three seeds.}\label{tab:synthetic_router}
+\end{table}
+
+The routing result should be interpreted carefully. It does not show that a deployable learner router will work inside a pretrained language model. The synthetic tasks are controlled, the features are hand-designed, and the train/test split is within the same task families. Nevertheless, the result is useful: learner preference is not pure noise. Some of the oracle signal is recoverable from local geometry, especially when the router is trained to minimise loss rather than classify exact winners.
+
+At the same time, the router leaves most of the oracle gap unrecovered. This is also informative. It suggests that hard discrete selection among readout rules is a limited mechanism. The next chapters therefore do not treat routing as the final method. Instead, they use these results to motivate a softer relaxation: alternative learners can define directions in attention-output space, and a trainable method can learn how to combine or generalise those directions.
+
+\section{Implications for Pretrained Transformers}\label{sec:ttr_implications_for_transformers}
+
+The experiments in this chapter are intentionally synthetic, but they establish three points needed for the rest of the thesis.
+
+First, the TTR readout space is empirically nontrivial. Holding the key-value context fixed, changing the readout rule changes the prediction in systematic ways. The best readout depends on the structure of the task: recency-biased softmax is strongest in the piecewise-linear setting, Local Linear Attention is strongest for local extrapolation, and global ridge regression is strongest in the smooth nonlinear setting.
+
+Second, the best readout is not only task-dependent but query-dependent. The query-wise oracle improves over the best fixed learner by \(13.0\%\), \(14.3\%\), and \(28.7\%\) across the three tasks. Winner fractions show that even the most common winner in each task does not dominate all queries. This supports the view that alternative readouts are not merely alternative architectures, but probes of different useful directions in a shared output space.
+
+Third, simple learned routing only partially recovers the oracle signal. A loss-aware router can close part of the gap, but not enough to make hard routing a satisfactory endpoint. This motivates the next step in the thesis: instead of replacing softmax attention with a discrete alternative learner, treat the difference between an alternative readout and the softmax readout,
+\[
+\Delta z_a = z_a - z_{\mathrm{soft}},
+\]
+as a correction direction. This reframes alternative learners as a basis for modifying the attention output rather than as mutually exclusive replacements.
+
+The next chapter therefore moves from controlled synthetic readout tasks to frozen pretrained Transformers. It asks whether the same idea has empirical content inside GPT-2: when the learned query-key-value geometry is fixed, do non-softmax readouts ever produce attention outputs that improve downstream language-model loss?

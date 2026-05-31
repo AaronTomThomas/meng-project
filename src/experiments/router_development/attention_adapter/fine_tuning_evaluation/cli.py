@@ -9,11 +9,11 @@ from experiments.router_development.attention_adapter.fine_tuning_evaluation.tra
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fine-tune and evaluate attention-adapter methods on official GLUE SST-2 files."
+        description="Fine-tune and evaluate attention-adapter methods on official GLUE files."
     )
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--method", type=str, required=True, choices=["zero_shot", "full_finetune", "akaza_freez", "lora", "loreft", "reft"])
-    parser.add_argument("--task", type=str, required=True, choices=["sst2"])
+    parser.add_argument("--task", type=str, required=True, choices=["sst2", "rte"])
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--glue_data_dir", type=str, default="glue_data")
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from datasets import Dataset
 
 from experiments.router_development.attention_adapter.fine_tuning_evaluation.config import FineTuneEvalConfig
-from experiments.router_development.attention_adapter.fine_tuning_evaluation.download_glue_data import ensure_sst2
+from experiments.router_development.attention_adapter.fine_tuning_evaluation.download_glue_data import ensure_glue_task
 from experiments.router_development.attention_adapter.fine_tuning_evaluation.tasks import GlueTaskSpec
 
 
@@ -71,22 +71,52 @@ def _load_sst2_tsv(path: Path, *, has_labels: bool) -> Dataset:
     return Dataset.from_list(rows)
 
 
+def _parse_optional_label(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in {"", "-1"}:
+        return None
+    return text
+
+
+def _load_rte_tsv(path: Path, *, has_labels: bool) -> Dataset:
+    rows: list[dict[str, object]] = []
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row_idx, row in enumerate(reader):
+            example: dict[str, object] = {
+                "sentence1": row["sentence1"],
+                "sentence2": row["sentence2"],
+            }
+            official_index = _parse_optional_int(row.get("index", row.get("idx")))
+            example["idx"] = row_idx if official_index is None else official_index
+            if official_index is not None:
+                example["index"] = official_index
+            if has_labels:
+                example["label"] = _parse_optional_label(row.get("label"))
+            rows.append(example)
+    return Dataset.from_list(rows)
+
+
 def _load_local_glue_task(data_dir: str | Path, task: GlueTaskSpec) -> dict[str, Dataset]:
-    if task.name != "sst2":
-        raise ValueError(f"Unsupported GLUE task={task.name!r}; only 'sst2' is active")
-    task_dir = ensure_sst2(data_dir)
+    task_dir = ensure_glue_task(data_dir, task.name)
+    if task.name == "sst2":
+        loader = _load_sst2_tsv
+    elif task.name == "rte":
+        loader = _load_rte_tsv
+    else:
+        raise ValueError(f"Unsupported GLUE task={task.name!r}; choices are 'sst2' and 'rte'")
     return {
-        "train": _load_sst2_tsv(task_dir / task.train_file, has_labels=True),
-        "validation": _load_sst2_tsv(task_dir / task.validation_file, has_labels=True),
-        "test": _load_sst2_tsv(task_dir / task.test_file, has_labels=False),
+        "train": loader(task_dir / task.train_file, has_labels=True),
+        "validation": loader(task_dir / task.validation_file, has_labels=True),
+        "test": loader(task_dir / task.test_file, has_labels=False),
     }
 
 
 def load_task_data(task: GlueTaskSpec, cfg: FineTuneEvalConfig) -> LoadedTaskData:
     if cfg.selection_split_from_train < 0.0 or cfg.selection_split_from_train >= 1.0:
         raise ValueError("selection_split_from_train must be in [0.0, 1.0)")
-    if task.name != "sst2":
-        raise ValueError(f"Unsupported task={task.name!r}; only 'sst2' is active")
     raw = _load_local_glue_task(cfg.glue_data_dir, task)
     train = raw["train"]
     report_val = raw["validation"]
