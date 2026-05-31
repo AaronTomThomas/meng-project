@@ -72,7 +72,7 @@ TASKS: dict[str, GlueTaskSpec] = {
         formatter=_sst2,
         candidates={"negative": " negative", "positive": " positive"},
         submission_name="SST-2",
-        submission_labels={"negative": "negative", "positive": "positive"},
+        submission_labels={"negative": "0", "positive": "1"},
         add_eos_to_target=False,
         score_normalization="mean_token_logprob",
     ),

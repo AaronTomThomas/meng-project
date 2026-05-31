@@ -57,6 +57,15 @@ negative -> " negative"
 positive -> " positive"
 ```
 
+The per-example JSON/CSV prediction files use these human-readable internal
+labels. The official `submissions/SST-2.tsv` file maps them back to the GLUE
+training labels:
+
+```text
+negative -> 0
+positive -> 1
+```
+
 The official SST-2 test labels are hidden, so local metrics do not include test accuracy. The test split is used only to write prediction files. For local thesis reporting, use validation accuracy on `dev.tsv`.
 
 ## Evaluation Protocol
