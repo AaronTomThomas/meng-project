@@ -125,8 +125,21 @@ class ResidualReFTAdapter(AdapterModel):
 
         for p in self.reft_model.model.parameters():
             p.requires_grad_(False)
+        self._initialise_loreft_noop()
         for p in self.reft_model.interventions.parameters():
             p.requires_grad_(True)
+
+    def _initialise_loreft_noop(self) -> None:
+        """Set PyReFT LoReFT source map equal to its rotation so h' == h at init."""
+        with torch.no_grad():
+            for module in self.reft_model.interventions.modules():
+                if not hasattr(module, "learned_source") or not hasattr(module, "rotate_layer"):
+                    continue
+                source = module.learned_source
+                rotate_weight = module.rotate_layer.weight.detach()
+                source.weight.copy_(rotate_weight.T.to(device=source.weight.device, dtype=source.weight.dtype))
+                if source.bias is not None:
+                    source.bias.zero_()
 
     @property
     def device(self) -> torch.device:
