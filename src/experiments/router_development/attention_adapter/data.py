@@ -14,7 +14,7 @@ def short_hash(s: str) -> str:
 def _text_cache_key(cfg: AdapterFineTuneConfig, text_field: str) -> str:
     return (
         f"{cfg.model_name}|{cfg.dataset_name}|{cfg.dataset_config}|{cfg.dataset_revision}|{cfg.split}|"
-        f"text={text_field}|block={cfg.block_size}|"
+        f"text={text_field}|pack=concat_v2|block={cfg.block_size}|"
         f"max_chunks={cfg.max_chunks}"
     )
 
@@ -132,6 +132,7 @@ def load_and_pack_texts(
         ds = load_dataset(cfg.dataset_name, split=cfg.split, **kwargs)
 
     token_blocks = []
+    token_buffer: list[int] = []
     total_texts = 0
     print("[data] tokenizing and packing texts...")
     for ex in ds:
@@ -139,15 +140,30 @@ def load_and_pack_texts(
         if not isinstance(text, str) or not text.strip():
             continue
         ids = tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
-        if ids.numel() < cfg.block_size:
+        if ids.numel() == 0:
             continue
-        n_blocks = ids.numel() // cfg.block_size
-        ids = ids[: n_blocks * cfg.block_size].view(n_blocks, cfg.block_size)
-        token_blocks.append(ids)
+        token_buffer.extend(int(x) for x in ids.tolist())
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token_id is not None:
+            token_buffer.append(int(eos_token_id))
+
+        while len(token_buffer) >= cfg.block_size:
+            block = token_buffer[: cfg.block_size]
+            token_blocks.append(torch.tensor(block, dtype=torch.long).view(1, cfg.block_size))
+            del token_buffer[: cfg.block_size]
+            if cfg.max_chunks > 0 and len(token_blocks) >= cfg.max_chunks:
+                break
         total_texts += 1
+        if cfg.max_chunks > 0 and len(token_blocks) >= cfg.max_chunks:
+            break
     if not token_blocks:
-        raise ValueError("No usable token blocks found.")
-    chunks = torch.cat(token_blocks, dim=0)[: cfg.max_chunks]
+        raise ValueError(
+            "No usable token blocks found. Check text_field, split, and block_size; "
+            "the tokenized corpus may be empty."
+        )
+    chunks = torch.cat(token_blocks, dim=0)
+    if cfg.max_chunks > 0:
+        chunks = chunks[: cfg.max_chunks]
     print(f"[data] packed {chunks.shape[0]} chunks from {total_texts} texts")
     torch.save(chunks.cpu(), cache_path)
     return chunks
