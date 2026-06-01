@@ -165,20 +165,25 @@ def config_from_args(args: argparse.Namespace) -> AdapterFineTuneConfig:
 
         "split": args.train_split,
         "max_chunks": args.max_train_chunks,
-        "bottleneck_dim": args.bottleneck_dim,
-        "adapter_dropout": args.adapter_dropout,
-        "output_scale": args.output_scale,
-        "peft_target_profile": args.peft_target_profile,
-        "lora_rank": args.lora_rank,
-        "lora_alpha": args.lora_alpha,
-        "lora_dropout": args.lora_dropout,
-        "lora_bias": args.lora_bias,
-        "reft_rank": args.reft_rank,
-        "reft_dropout": args.reft_dropout,
-        "reft_output_scale": args.reft_output_scale,
-        "reft_position_mode": args.reft_position_mode,
-        "reft_prefix_positions": args.reft_prefix_positions,
-        "reft_suffix_positions": args.reft_suffix_positions,
     }
+
+    for name in (
+        "bottleneck_dim",
+        "adapter_dropout",
+        "output_scale",
+        "peft_target_profile",
+        "lora_rank",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_bias",
+        "reft_rank",
+        "reft_dropout",
+        "reft_output_scale",
+        "reft_position_mode",
+        "reft_prefix_positions",
+        "reft_suffix_positions",
+    ):
+        if hasattr(args, name):
+            config_kwargs[name] = getattr(args, name)
 
     return config_from_values(args.method, **config_kwargs)
