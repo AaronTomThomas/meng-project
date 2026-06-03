@@ -1,35 +1,39 @@
 from __future__ import annotations
 
 """
-Token-level geometric bridge between beneficial counterfactual learner readouts
-and trained AKAZA/FreeZ corrections.
+Token-level geometric bridge between counterfactual learner readouts and
+trained AKAZA/FreeZ corrections.
 
-Question:
-    For each layer/token/candidate learner, if replacing z_soft with the
-    candidate readout z_a improves frozen-model next-token NLL, is z_a closer
-    to the trained AKAZA-corrected readout z_soft + delta than z_soft itself?
+Main question:
+    For each layer/token/candidate learner, when replacing z_soft with a
+    candidate readout z_a improves frozen-model next-token NLL, does the
+    candidate movement d_a = z_a - z_soft point toward the trained AKAZA
+    correction delta?
 
-This is intentionally GPT-2-specific and mirrors the plumbing used by the
-existing TTR bridge probe:
-    - load a trained GPT-2 AKAZA/FreeZ checkpoint,
-    - compute candidate readouts from frozen q/K/V geometry,
-    - patch each candidate readout into the frozen model,
-    - compare each candidate direction d_a = z_a - z_soft to the trained
-      AKAZA direction delta.
+This script reports two families of metrics:
 
-The key metrics are computed in both:
-    1. pre-projection z-space, and
-    2. post-output-projection residual-effect space, using frozen attn.c_proj.
+1. Endpoint closeness:
+       ||d_a - delta|| < ||delta||
 
-A candidate is "closer than soft" when:
+   This asks whether the actual candidate endpoint z_a is closer to the
+   AKAZA-corrected readout z_soft + delta than z_soft itself is.
 
-    ||z_a - z_AKAZA|| < ||z_soft - z_AKAZA||
+   This is strict and can fail even if d_a points in the right direction but
+   has the wrong magnitude.
 
-equivalently:
+2. Ray / scale-free closeness:
+       alpha* = <d_a, delta> / ||d_a||^2
+       ||alpha* d_a - delta|| < ||delta||
 
-    ||d_a - delta|| < ||delta||
+   This asks whether the candidate learner direction spans a ray that points
+   toward the AKAZA correction, allowing for an optimal scalar rescaling.
 
-and similarly after the frozen output projection W_O.
+Both metric families are computed in:
+    - pre-projection z-space,
+    - post-output-projection residual-effect space, after frozen attn.c_proj.
+
+This is intentionally GPT-2-specific and uses the same checkpoint/config/data
+plumbing as the existing bridge probes.
 """
 
 import argparse
@@ -39,7 +43,7 @@ import math
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, DefaultDict, Dict, Iterable, Mapping, Sequence
+from typing import Any, DefaultDict, Dict, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -71,33 +75,56 @@ METRIC_NAMES = [
     "candidate_gain",
     "is_beneficial",
     "G_AKAZA",
+
     "delta_norm_z",
     "delta_norm_WO",
     "candidate_direction_norm_z",
     "candidate_direction_norm_WO",
-    "soft_to_akaza_z",
-    "candidate_to_akaza_z",
-    "distance_ratio_z",
-    "relative_closeness_z",
-    "closer_than_soft_z",
+
+    # Endpoint metrics.
+    "endpoint_distance_ratio_z",
+    "endpoint_distance_ratio_WO",
+    "endpoint_relative_closeness_z",
+    "endpoint_relative_closeness_WO",
+    "endpoint_closer_than_soft_z",
+    "endpoint_closer_than_soft_WO",
+
+    # Directional metrics.
     "cosine_to_akaza_z",
-    "projection_frac_onto_akaza_z",
-    "soft_to_akaza_WO",
-    "candidate_to_akaza_WO",
-    "distance_ratio_WO",
-    "relative_closeness_WO",
-    "closer_than_soft_WO",
     "cosine_to_akaza_WO",
+    "projection_frac_onto_akaza_z",
     "projection_frac_onto_akaza_WO",
+
+    # Ray/scale-free metrics.
+    "ray_alpha_z",
+    "ray_alpha_WO",
+    "ray_alpha_positive_z",
+    "ray_alpha_positive_WO",
+    "ray_distance_ratio_z",
+    "ray_distance_ratio_WO",
+    "ray_relative_closeness_z",
+    "ray_relative_closeness_WO",
+    "ray_closer_than_soft_z",
+    "ray_closer_than_soft_WO",
+    "positive_ray_closer_than_soft_z",
+    "positive_ray_closer_than_soft_WO",
 ]
 
 CORR_PAIRS = [
-    ("candidate_gain", "relative_closeness_z"),
-    ("candidate_gain", "relative_closeness_WO"),
+    ("candidate_gain", "endpoint_relative_closeness_z"),
+    ("candidate_gain", "endpoint_relative_closeness_WO"),
+    ("candidate_gain", "endpoint_closer_than_soft_z"),
+    ("candidate_gain", "endpoint_closer_than_soft_WO"),
+
     ("candidate_gain", "cosine_to_akaza_z"),
     ("candidate_gain", "cosine_to_akaza_WO"),
-    ("candidate_gain", "closer_than_soft_z"),
-    ("candidate_gain", "closer_than_soft_WO"),
+
+    ("candidate_gain", "ray_relative_closeness_z"),
+    ("candidate_gain", "ray_relative_closeness_WO"),
+    ("candidate_gain", "ray_closer_than_soft_z"),
+    ("candidate_gain", "ray_closer_than_soft_WO"),
+    ("candidate_gain", "positive_ray_closer_than_soft_z"),
+    ("candidate_gain", "positive_ray_closer_than_soft_WO"),
 ]
 
 
@@ -112,7 +139,7 @@ def c_proj_linear_delta(block, delta: torch.Tensor) -> torch.Tensor:
     """
     Apply GPT-2 attn.c_proj to a delta without counting the projection bias.
 
-    GPT-2's Conv1D projection supports arbitrary leading dimensions, so this
+    GPT-2's Conv1D projection accepts arbitrary leading dimensions, so this
     works for [B,T,D] and [B,T,A,D].
     """
     zeros = torch.zeros_like(delta)
@@ -121,6 +148,70 @@ def c_proj_linear_delta(block, delta: torch.Tensor) -> torch.Tensor:
 
 def safe_div(num: torch.Tensor, den: torch.Tensor, eps: float) -> torch.Tensor:
     return num / den.clamp_min(eps)
+
+
+def endpoint_and_ray_metrics(
+    *,
+    direction: torch.Tensor,
+    delta: torch.Tensor,
+    eps: float,
+) -> Dict[str, torch.Tensor]:
+    """
+    Compute endpoint and ray metrics for tensors of shape [B,T,D].
+
+    direction = d_a = z_candidate - z_soft
+    delta     = trained AKAZA correction
+    """
+    direction = direction.float()
+    delta = delta.float()
+
+    delta_norm = delta.norm(dim=-1)
+    direction_norm = direction.norm(dim=-1)
+
+    endpoint_dist = (direction - delta).norm(dim=-1)
+    endpoint_ratio = safe_div(endpoint_dist, delta_norm, eps)
+    endpoint_rel = 1.0 - endpoint_ratio
+    endpoint_closer = (endpoint_dist < delta_norm).float()
+
+    cosine = F.cosine_similarity(direction, delta, dim=-1, eps=eps)
+    projection_frac = (
+        (direction * delta).sum(dim=-1)
+        / delta.square().sum(dim=-1).clamp_min(eps)
+    )
+
+    # Best scalar alpha that maps direction to delta in least squares:
+    #     min_alpha ||alpha direction - delta||^2
+    alpha = (
+        (direction * delta).sum(dim=-1)
+        / direction.square().sum(dim=-1).clamp_min(eps)
+    )
+    ray_point = alpha.unsqueeze(-1) * direction
+    ray_dist = (ray_point - delta).norm(dim=-1)
+    ray_ratio = safe_div(ray_dist, delta_norm, eps)
+    ray_rel = 1.0 - ray_ratio
+    ray_closer = (ray_dist < delta_norm).float()
+
+    alpha_positive = (alpha > 0).float()
+    positive_ray_closer = ((alpha > 0) & (ray_dist < delta_norm)).float()
+
+    return {
+        "delta_norm": delta_norm,
+        "direction_norm": direction_norm,
+
+        "endpoint_distance_ratio": endpoint_ratio,
+        "endpoint_relative_closeness": endpoint_rel,
+        "endpoint_closer_than_soft": endpoint_closer,
+
+        "cosine_to_akaza": cosine,
+        "projection_frac_onto_akaza": projection_frac,
+
+        "ray_alpha": alpha,
+        "ray_alpha_positive": alpha_positive,
+        "ray_distance_ratio": ray_ratio,
+        "ray_relative_closeness": ray_rel,
+        "ray_closer_than_soft": ray_closer,
+        "positive_ray_closer_than_soft": positive_ray_closer,
+    }
 
 
 class RunningStats:
@@ -198,16 +289,30 @@ class RunningStats:
         for x_name, y_name in CORR_PAIRS:
             out[f"pearson_{x_name}_vs_{y_name}"] = self._pearson(x_name, y_name)
 
-        # Friendlier aliases for headline quantities.
         out["frac_beneficial"] = out["mean_is_beneficial"]
-        out["frac_closer_than_soft_z"] = out["mean_closer_than_soft_z"]
-        out["frac_closer_than_soft_WO"] = out["mean_closer_than_soft_WO"]
+
+        out["frac_endpoint_closer_than_soft_z"] = out["mean_endpoint_closer_than_soft_z"]
+        out["frac_endpoint_closer_than_soft_WO"] = out["mean_endpoint_closer_than_soft_WO"]
+
+        out["frac_ray_alpha_positive_z"] = out["mean_ray_alpha_positive_z"]
+        out["frac_ray_alpha_positive_WO"] = out["mean_ray_alpha_positive_WO"]
+
+        out["frac_ray_closer_than_soft_z"] = out["mean_ray_closer_than_soft_z"]
+        out["frac_ray_closer_than_soft_WO"] = out["mean_ray_closer_than_soft_WO"]
+
+        out["frac_positive_ray_closer_than_soft_z"] = out[
+            "mean_positive_ray_closer_than_soft_z"
+        ]
+        out["frac_positive_ray_closer_than_soft_WO"] = out[
+            "mean_positive_ray_closer_than_soft_WO"
+        ]
+
         return out
 
 
 class NestedAccumulator:
     """
-    Stores streaming summaries for:
+    Streaming summaries for:
       - global
       - per layer
       - per learner
@@ -305,43 +410,15 @@ def build_metric_tensors(
     All returned tensors have shape [B,T-1].
     """
 
-    delta_norm_z = delta_tok.float().norm(dim=-1)
-    delta_norm_wo = delta_wo_tok.float().norm(dim=-1)
-    direction_norm_z = direction_tok.float().norm(dim=-1)
-    direction_norm_wo = direction_wo_tok.float().norm(dim=-1)
-
-    candidate_to_akaza_z = (direction_tok.float() - delta_tok.float()).norm(dim=-1)
-    candidate_to_akaza_wo = (direction_wo_tok.float() - delta_wo_tok.float()).norm(dim=-1)
-
-    distance_ratio_z = safe_div(candidate_to_akaza_z, delta_norm_z, eps)
-    distance_ratio_wo = safe_div(candidate_to_akaza_wo, delta_norm_wo, eps)
-
-    relative_closeness_z = 1.0 - distance_ratio_z
-    relative_closeness_wo = 1.0 - distance_ratio_wo
-
-    closer_z = (candidate_to_akaza_z < delta_norm_z).float()
-    closer_wo = (candidate_to_akaza_wo < delta_norm_wo).float()
-
-    cosine_z = F.cosine_similarity(
-        direction_tok.float(),
-        delta_tok.float(),
-        dim=-1,
+    z_metrics = endpoint_and_ray_metrics(
+        direction=direction_tok,
+        delta=delta_tok,
         eps=eps,
     )
-    cosine_wo = F.cosine_similarity(
-        direction_wo_tok.float(),
-        delta_wo_tok.float(),
-        dim=-1,
+    wo_metrics = endpoint_and_ray_metrics(
+        direction=direction_wo_tok,
+        delta=delta_wo_tok,
         eps=eps,
-    )
-
-    projection_frac_z = (
-        (direction_tok.float() * delta_tok.float()).sum(dim=-1)
-        / delta_tok.float().square().sum(dim=-1).clamp_min(eps)
-    )
-    projection_frac_wo = (
-        (direction_wo_tok.float() * delta_wo_tok.float()).sum(dim=-1)
-        / delta_wo_tok.float().square().sum(dim=-1).clamp_min(eps)
     )
 
     is_beneficial = (candidate_gain > gain_threshold).float()
@@ -350,24 +427,36 @@ def build_metric_tensors(
         "candidate_gain": candidate_gain.float(),
         "is_beneficial": is_beneficial,
         "G_AKAZA": g_akaza.float(),
-        "delta_norm_z": delta_norm_z,
-        "delta_norm_WO": delta_norm_wo,
-        "candidate_direction_norm_z": direction_norm_z,
-        "candidate_direction_norm_WO": direction_norm_wo,
-        "soft_to_akaza_z": delta_norm_z,
-        "candidate_to_akaza_z": candidate_to_akaza_z,
-        "distance_ratio_z": distance_ratio_z,
-        "relative_closeness_z": relative_closeness_z,
-        "closer_than_soft_z": closer_z,
-        "cosine_to_akaza_z": cosine_z,
-        "projection_frac_onto_akaza_z": projection_frac_z,
-        "soft_to_akaza_WO": delta_norm_wo,
-        "candidate_to_akaza_WO": candidate_to_akaza_wo,
-        "distance_ratio_WO": distance_ratio_wo,
-        "relative_closeness_WO": relative_closeness_wo,
-        "closer_than_soft_WO": closer_wo,
-        "cosine_to_akaza_WO": cosine_wo,
-        "projection_frac_onto_akaza_WO": projection_frac_wo,
+
+        "delta_norm_z": z_metrics["delta_norm"],
+        "delta_norm_WO": wo_metrics["delta_norm"],
+        "candidate_direction_norm_z": z_metrics["direction_norm"],
+        "candidate_direction_norm_WO": wo_metrics["direction_norm"],
+
+        "endpoint_distance_ratio_z": z_metrics["endpoint_distance_ratio"],
+        "endpoint_distance_ratio_WO": wo_metrics["endpoint_distance_ratio"],
+        "endpoint_relative_closeness_z": z_metrics["endpoint_relative_closeness"],
+        "endpoint_relative_closeness_WO": wo_metrics["endpoint_relative_closeness"],
+        "endpoint_closer_than_soft_z": z_metrics["endpoint_closer_than_soft"],
+        "endpoint_closer_than_soft_WO": wo_metrics["endpoint_closer_than_soft"],
+
+        "cosine_to_akaza_z": z_metrics["cosine_to_akaza"],
+        "cosine_to_akaza_WO": wo_metrics["cosine_to_akaza"],
+        "projection_frac_onto_akaza_z": z_metrics["projection_frac_onto_akaza"],
+        "projection_frac_onto_akaza_WO": wo_metrics["projection_frac_onto_akaza"],
+
+        "ray_alpha_z": z_metrics["ray_alpha"],
+        "ray_alpha_WO": wo_metrics["ray_alpha"],
+        "ray_alpha_positive_z": z_metrics["ray_alpha_positive"],
+        "ray_alpha_positive_WO": wo_metrics["ray_alpha_positive"],
+        "ray_distance_ratio_z": z_metrics["ray_distance_ratio"],
+        "ray_distance_ratio_WO": wo_metrics["ray_distance_ratio"],
+        "ray_relative_closeness_z": z_metrics["ray_relative_closeness"],
+        "ray_relative_closeness_WO": wo_metrics["ray_relative_closeness"],
+        "ray_closer_than_soft_z": z_metrics["ray_closer_than_soft"],
+        "ray_closer_than_soft_WO": wo_metrics["ray_closer_than_soft"],
+        "positive_ray_closer_than_soft_z": z_metrics["positive_ray_closer_than_soft"],
+        "positive_ray_closer_than_soft_WO": wo_metrics["positive_ray_closer_than_soft"],
     }
 
 
@@ -383,29 +472,7 @@ def maybe_write_token_rows(
         return
 
     bsz, t_minus_1 = metrics["candidate_gain"].shape
-    cpu_metrics = {
-        name: value.detach().cpu()
-        for name, value in metrics.items()
-        if name in {
-            "candidate_gain",
-            "is_beneficial",
-            "G_AKAZA",
-            "delta_norm_z",
-            "delta_norm_WO",
-            "candidate_direction_norm_z",
-            "candidate_direction_norm_WO",
-            "relative_closeness_z",
-            "relative_closeness_WO",
-            "closer_than_soft_z",
-            "closer_than_soft_WO",
-            "cosine_to_akaza_z",
-            "cosine_to_akaza_WO",
-            "projection_frac_onto_akaza_z",
-            "projection_frac_onto_akaza_WO",
-            "distance_ratio_z",
-            "distance_ratio_WO",
-        }
-    }
+    cpu_metrics = {name: value.detach().cpu() for name, value in metrics.items()}
 
     for b in range(bsz):
         chunk_idx = start + b
@@ -452,23 +519,7 @@ def eval_akaza_learner_closeness(
                 "layer_idx",
                 "token_pos",
                 "learner",
-                "candidate_gain",
-                "is_beneficial",
-                "G_AKAZA",
-                "delta_norm_z",
-                "delta_norm_WO",
-                "candidate_direction_norm_z",
-                "candidate_direction_norm_WO",
-                "relative_closeness_z",
-                "relative_closeness_WO",
-                "closer_than_soft_z",
-                "closer_than_soft_WO",
-                "cosine_to_akaza_z",
-                "cosine_to_akaza_WO",
-                "projection_frac_onto_akaza_z",
-                "projection_frac_onto_akaza_WO",
-                "distance_ratio_z",
-                "distance_ratio_WO",
+                *METRIC_NAMES,
             ],
         )
         token_writer.writeheader()
@@ -492,6 +543,12 @@ def eval_akaza_learner_closeness(
             for layer_idx_raw in layer_indices:
                 layer_idx = int(layer_idx_raw)
                 block = model.transformer.h[layer_idx]
+
+                if layer_idx not in latest_deltas:
+                    raise KeyError(
+                        f"AKAZA wrapper did not record a delta for layer {layer_idx}. "
+                        f"Recorded layers: {sorted(latest_deltas)}"
+                    )
 
                 x_in = get_block_input_gpt2(model, input_ids, layer_idx)
                 _h_ln1, _q, _k, _v, _z_teacher, zcat_teacher, _block, _attn = (
@@ -571,25 +628,43 @@ def write_layer_learner_csv(path: str, layer_learners: Mapping[str, Any]) -> Non
         "learner",
         "group",
         "n",
+
         "mean_candidate_gain",
         "frac_beneficial",
         "mean_G_AKAZA",
+
         "mean_delta_norm_z",
         "mean_delta_norm_WO",
         "mean_candidate_direction_norm_z",
         "mean_candidate_direction_norm_WO",
-        "frac_closer_than_soft_z",
-        "frac_closer_than_soft_WO",
-        "mean_relative_closeness_z",
-        "mean_relative_closeness_WO",
+
+        "frac_endpoint_closer_than_soft_z",
+        "frac_endpoint_closer_than_soft_WO",
+        "mean_endpoint_relative_closeness_z",
+        "mean_endpoint_relative_closeness_WO",
+
         "mean_cosine_to_akaza_z",
         "mean_cosine_to_akaza_WO",
         "mean_projection_frac_onto_akaza_z",
         "mean_projection_frac_onto_akaza_WO",
-        "pearson_candidate_gain_vs_relative_closeness_z",
-        "pearson_candidate_gain_vs_relative_closeness_WO",
+
+        "mean_ray_alpha_z",
+        "mean_ray_alpha_WO",
+        "frac_ray_alpha_positive_z",
+        "frac_ray_alpha_positive_WO",
+        "frac_ray_closer_than_soft_z",
+        "frac_ray_closer_than_soft_WO",
+        "frac_positive_ray_closer_than_soft_z",
+        "frac_positive_ray_closer_than_soft_WO",
+        "mean_ray_relative_closeness_z",
+        "mean_ray_relative_closeness_WO",
+
+        "pearson_candidate_gain_vs_endpoint_relative_closeness_z",
+        "pearson_candidate_gain_vs_endpoint_relative_closeness_WO",
         "pearson_candidate_gain_vs_cosine_to_akaza_z",
         "pearson_candidate_gain_vs_cosine_to_akaza_WO",
+        "pearson_candidate_gain_vs_ray_relative_closeness_z",
+        "pearson_candidate_gain_vs_ray_relative_closeness_WO",
     ]
 
     out = Path(path)
@@ -607,17 +682,33 @@ def write_layer_learner_csv(path: str, layer_learners: Mapping[str, Any]) -> Non
                             "learner": learner_name,
                             "group": group_name,
                             "n": s["n"],
+
                             "mean_candidate_gain": s["mean_candidate_gain"],
                             "frac_beneficial": s["frac_beneficial"],
                             "mean_G_AKAZA": s["mean_G_AKAZA"],
+
                             "mean_delta_norm_z": s["mean_delta_norm_z"],
                             "mean_delta_norm_WO": s["mean_delta_norm_WO"],
-                            "mean_candidate_direction_norm_z": s["mean_candidate_direction_norm_z"],
-                            "mean_candidate_direction_norm_WO": s["mean_candidate_direction_norm_WO"],
-                            "frac_closer_than_soft_z": s["frac_closer_than_soft_z"],
-                            "frac_closer_than_soft_WO": s["frac_closer_than_soft_WO"],
-                            "mean_relative_closeness_z": s["mean_relative_closeness_z"],
-                            "mean_relative_closeness_WO": s["mean_relative_closeness_WO"],
+                            "mean_candidate_direction_norm_z": s[
+                                "mean_candidate_direction_norm_z"
+                            ],
+                            "mean_candidate_direction_norm_WO": s[
+                                "mean_candidate_direction_norm_WO"
+                            ],
+
+                            "frac_endpoint_closer_than_soft_z": s[
+                                "frac_endpoint_closer_than_soft_z"
+                            ],
+                            "frac_endpoint_closer_than_soft_WO": s[
+                                "frac_endpoint_closer_than_soft_WO"
+                            ],
+                            "mean_endpoint_relative_closeness_z": s[
+                                "mean_endpoint_relative_closeness_z"
+                            ],
+                            "mean_endpoint_relative_closeness_WO": s[
+                                "mean_endpoint_relative_closeness_WO"
+                            ],
+
                             "mean_cosine_to_akaza_z": s["mean_cosine_to_akaza_z"],
                             "mean_cosine_to_akaza_WO": s["mean_cosine_to_akaza_WO"],
                             "mean_projection_frac_onto_akaza_z": s[
@@ -626,17 +717,47 @@ def write_layer_learner_csv(path: str, layer_learners: Mapping[str, Any]) -> Non
                             "mean_projection_frac_onto_akaza_WO": s[
                                 "mean_projection_frac_onto_akaza_WO"
                             ],
-                            "pearson_candidate_gain_vs_relative_closeness_z": s[
-                                "pearson_candidate_gain_vs_relative_closeness_z"
+
+                            "mean_ray_alpha_z": s["mean_ray_alpha_z"],
+                            "mean_ray_alpha_WO": s["mean_ray_alpha_WO"],
+                            "frac_ray_alpha_positive_z": s["frac_ray_alpha_positive_z"],
+                            "frac_ray_alpha_positive_WO": s["frac_ray_alpha_positive_WO"],
+                            "frac_ray_closer_than_soft_z": s[
+                                "frac_ray_closer_than_soft_z"
                             ],
-                            "pearson_candidate_gain_vs_relative_closeness_WO": s[
-                                "pearson_candidate_gain_vs_relative_closeness_WO"
+                            "frac_ray_closer_than_soft_WO": s[
+                                "frac_ray_closer_than_soft_WO"
+                            ],
+                            "frac_positive_ray_closer_than_soft_z": s[
+                                "frac_positive_ray_closer_than_soft_z"
+                            ],
+                            "frac_positive_ray_closer_than_soft_WO": s[
+                                "frac_positive_ray_closer_than_soft_WO"
+                            ],
+                            "mean_ray_relative_closeness_z": s[
+                                "mean_ray_relative_closeness_z"
+                            ],
+                            "mean_ray_relative_closeness_WO": s[
+                                "mean_ray_relative_closeness_WO"
+                            ],
+
+                            "pearson_candidate_gain_vs_endpoint_relative_closeness_z": s[
+                                "pearson_candidate_gain_vs_endpoint_relative_closeness_z"
+                            ],
+                            "pearson_candidate_gain_vs_endpoint_relative_closeness_WO": s[
+                                "pearson_candidate_gain_vs_endpoint_relative_closeness_WO"
                             ],
                             "pearson_candidate_gain_vs_cosine_to_akaza_z": s[
                                 "pearson_candidate_gain_vs_cosine_to_akaza_z"
                             ],
                             "pearson_candidate_gain_vs_cosine_to_akaza_WO": s[
                                 "pearson_candidate_gain_vs_cosine_to_akaza_WO"
+                            ],
+                            "pearson_candidate_gain_vs_ray_relative_closeness_z": s[
+                                "pearson_candidate_gain_vs_ray_relative_closeness_z"
+                            ],
+                            "pearson_candidate_gain_vs_ray_relative_closeness_WO": s[
+                                "pearson_candidate_gain_vs_ray_relative_closeness_WO"
                             ],
                         }
                     )
@@ -655,20 +776,74 @@ def print_headline(metrics: Mapping[str, Any]) -> None:
     print("[summary]")
     print(f"  all pairs: n={int(all_s.get('n', 0))}")
     print(f"  beneficial fraction: {get(all_s, 'frac_beneficial'):.6f}")
-    print("  closer-than-soft fraction:")
-    print(f"    all          z={get(all_s, 'frac_closer_than_soft_z'):.6f}  WO={get(all_s, 'frac_closer_than_soft_WO'):.6f}")
-    print(f"    beneficial  z={get(ben_s, 'frac_closer_than_soft_z'):.6f}  WO={get(ben_s, 'frac_closer_than_soft_WO'):.6f}")
-    print(f"    nonbenef    z={get(non_s, 'frac_closer_than_soft_z'):.6f}  WO={get(non_s, 'frac_closer_than_soft_WO'):.6f}")
+
+    print("  endpoint closer-than-soft fraction:")
+    print(
+        f"    all          z={get(all_s, 'frac_endpoint_closer_than_soft_z'):.6f}  "
+        f"WO={get(all_s, 'frac_endpoint_closer_than_soft_WO'):.6f}"
+    )
+    print(
+        f"    beneficial  z={get(ben_s, 'frac_endpoint_closer_than_soft_z'):.6f}  "
+        f"WO={get(ben_s, 'frac_endpoint_closer_than_soft_WO'):.6f}"
+    )
+    print(
+        f"    nonbenef    z={get(non_s, 'frac_endpoint_closer_than_soft_z'):.6f}  "
+        f"WO={get(non_s, 'frac_endpoint_closer_than_soft_WO'):.6f}"
+    )
+
+    print("  ray closer-than-soft fraction:")
+    print(
+        f"    all          z={get(all_s, 'frac_ray_closer_than_soft_z'):.6f}  "
+        f"WO={get(all_s, 'frac_ray_closer_than_soft_WO'):.6f}"
+    )
+    print(
+        f"    beneficial  z={get(ben_s, 'frac_ray_closer_than_soft_z'):.6f}  "
+        f"WO={get(ben_s, 'frac_ray_closer_than_soft_WO'):.6f}"
+    )
+    print(
+        f"    nonbenef    z={get(non_s, 'frac_ray_closer_than_soft_z'):.6f}  "
+        f"WO={get(non_s, 'frac_ray_closer_than_soft_WO'):.6f}"
+    )
+
+    print("  positive-ray closer-than-soft fraction:")
+    print(
+        f"    beneficial  z={get(ben_s, 'frac_positive_ray_closer_than_soft_z'):.6f}  "
+        f"WO={get(ben_s, 'frac_positive_ray_closer_than_soft_WO'):.6f}"
+    )
+    print(
+        f"    nonbenef    z={get(non_s, 'frac_positive_ray_closer_than_soft_z'):.6f}  "
+        f"WO={get(non_s, 'frac_positive_ray_closer_than_soft_WO'):.6f}"
+    )
+
     print("  mean cosine to AKAZA:")
-    print(f"    beneficial  z={get(ben_s, 'mean_cosine_to_akaza_z'):.6f}  WO={get(ben_s, 'mean_cosine_to_akaza_WO'):.6f}")
-    print(f"    nonbenef    z={get(non_s, 'mean_cosine_to_akaza_z'):.6f}  WO={get(non_s, 'mean_cosine_to_akaza_WO'):.6f}")
+    print(
+        f"    beneficial  z={get(ben_s, 'mean_cosine_to_akaza_z'):.6f}  "
+        f"WO={get(ben_s, 'mean_cosine_to_akaza_WO'):.6f}"
+    )
+    print(
+        f"    nonbenef    z={get(non_s, 'mean_cosine_to_akaza_z'):.6f}  "
+        f"WO={get(non_s, 'mean_cosine_to_akaza_WO'):.6f}"
+    )
+
+    print("  mean ray relative closeness:")
+    print(
+        f"    beneficial  z={get(ben_s, 'mean_ray_relative_closeness_z'):.6f}  "
+        f"WO={get(ben_s, 'mean_ray_relative_closeness_WO'):.6f}"
+    )
+    print(
+        f"    nonbenef    z={get(non_s, 'mean_ray_relative_closeness_z'):.6f}  "
+        f"WO={get(non_s, 'mean_ray_relative_closeness_WO'):.6f}"
+    )
 
 
 def main() -> None:
     default_hp = LearnerHyperParams()
 
     parser = argparse.ArgumentParser(
-        description="Evaluate whether beneficial learner readouts move closer to trained AKAZA corrections."
+        description=(
+            "Evaluate whether beneficial learner directions align with trained "
+            "AKAZA corrections, including scale-free ray metrics."
+        )
     )
     parser.add_argument("--checkpoint_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
@@ -818,10 +993,12 @@ def main() -> None:
             "candidate_gain": "base_token_nll - token_nll_after_replacing_layer_z_with_candidate_readout",
             "beneficial": "candidate_gain > gain_threshold",
             "delta": "trained AKAZA correction at the same layer/token",
-            "closer_than_soft_z": "||d_a - delta|| < ||delta||, where d_a = z_candidate - z_soft",
-            "relative_closeness_z": "1 - ||d_a - delta|| / ||delta||",
-            "closer_than_soft_WO": "same test after applying frozen attn.c_proj linearly to d_a and delta",
-            "relative_closeness_WO": "1 - ||d_a W_O - delta W_O|| / ||delta W_O||",
+            "endpoint_closer_than_soft_z": "||d_a - delta|| < ||delta||",
+            "endpoint_relative_closeness_z": "1 - ||d_a - delta|| / ||delta||",
+            "ray_alpha_z": "<d_a, delta> / ||d_a||^2",
+            "ray_closer_than_soft_z": "||alpha*d_a - delta|| < ||delta|| using least-squares alpha",
+            "positive_ray_closer_than_soft_z": "ray_closer_than_soft_z and alpha > 0",
+            "WO_metrics": "same tests after applying frozen attn.c_proj linearly to d_a and delta",
             "token_positions": "next-token positions 0..block_size-2",
         },
         **metrics,
