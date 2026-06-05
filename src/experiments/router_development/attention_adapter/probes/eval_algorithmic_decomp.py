@@ -78,6 +78,7 @@ PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter
 import argparse
 import json
 import math
+import time
 from dataclasses import asdict, fields
 from enum import Enum
 from pathlib import Path
@@ -582,6 +583,8 @@ def eval_algorithmic_decomp(
     *,
     mode: str,
     collect_algorithmic_stats: bool = False,
+    split_name: str = "",
+    progress_every: int = 0,
 ) -> Dict[str, float]:
     wrapped.set_decomp_mode(mode)
     wrapped.set_peft_eval_mode()
@@ -590,8 +593,19 @@ def eval_algorithmic_decomp(
     stats_accum: Dict[str, float] = {}
     n_stats_batches = 0
     n_examples = chunks.shape[0]
+    n_batches = math.ceil(n_examples / batch_size) if batch_size > 0 else 0
+    start_time = time.time()
 
-    for sl in range(0, n_examples, batch_size):
+    if progress_every > 0:
+        split_prefix = f"{split_name} " if split_name else ""
+        print(
+            f"  [{split_prefix}mode={mode}] starting "
+            f"batches={n_batches} examples={n_examples} batch_size={batch_size} "
+            f"collect_stats={collect_algorithmic_stats}",
+            flush=True,
+        )
+
+    for batch_idx, sl in enumerate(range(0, n_examples, batch_size), start=1):
         input_ids = chunks[sl : min(sl + batch_size, n_examples)].to(wrapped.device)
         logits = wrapped(input_ids)
         loss = lm_loss(logits, input_ids)
@@ -602,6 +616,18 @@ def eval_algorithmic_decomp(
             for k, v in stats.items():
                 stats_accum[k] = stats_accum.get(k, 0.0) + float(v)
             n_stats_batches += 1
+
+        if progress_every > 0 and (batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == n_batches):
+            done_examples = min(sl + batch_size, n_examples)
+            running_loss = sum(losses) / max(1, done_examples)
+            elapsed = time.time() - start_time
+            split_prefix = f"{split_name} " if split_name else ""
+            print(
+                f"  [{split_prefix}mode={mode}] "
+                f"batch {batch_idx}/{n_batches} examples {done_examples}/{n_examples} "
+                f"running_loss={running_loss:.6f} elapsed={elapsed:.1f}s",
+                flush=True,
+            )
 
     out = {"loss": sum(losses) / max(1, n_examples)}
     if collect_algorithmic_stats:
@@ -653,6 +679,12 @@ def main() -> None:
     parser.add_argument("--max_val_chunks", type=int, default=None)
     parser.add_argument("--max_test_chunks", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--progress_every",
+        type=int,
+        default=10,
+        help="Print progress every N batches during each eval mode. Set to 0 to disable batch progress logs.",
+    )
 
     parser.add_argument("--candidate_learners", type=str, default=",".join(DEFAULT_CANDIDATE_LEARNERS))
 
@@ -738,16 +770,20 @@ def main() -> None:
     print(f"  candidate_learners: {candidate_names}")
     print(f"  projection_ridge_lambda: {args.ridge_lambda}")
     print(f"  learner_hparams: {learner_hparams}")
+    print(f"  progress_every: {args.progress_every}")
 
+    print("[model] loading tokenizer", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print("[model] loading base model", flush=True)
     model = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
+    print("[model] building decomposed wrapper and loading trainable checkpoint state", flush=True)
     wrapped = AlgorithmicDecomposedAKAZAFreeZModel(
         model=model,
         cfg=cfg,
@@ -772,6 +808,7 @@ def main() -> None:
     need_test = args.eval_split in {"test", "val_test", "all"}
 
     if need_train:
+        print(f"  loading train split={cfg.train_split} max_chunks={cfg.max_train_chunks}", flush=True)
         chunks_by_split["train"] = load_chunks_for_split(
             cfg,
             tokenizer,
@@ -779,6 +816,7 @@ def main() -> None:
             max_chunks=cfg.max_train_chunks,
         )
     if need_val:
+        print(f"  loading val split={cfg.val_split} max_chunks={cfg.max_val_chunks}", flush=True)
         chunks_by_split["val"] = load_chunks_for_split(
             cfg,
             tokenizer,
@@ -786,6 +824,7 @@ def main() -> None:
             max_chunks=cfg.max_val_chunks,
         )
     if need_test:
+        print(f"  loading test split={cfg.test_split} max_chunks={cfg.max_test_chunks}", flush=True)
         chunks_by_split["test"] = load_chunks_for_split(
             cfg,
             tokenizer,
@@ -817,6 +856,8 @@ def main() -> None:
     print()
     print("[eval]")
     for split_name, chunks in chunks_by_split.items():
+        split_start = time.time()
+        print(f"\n[{split_name}] evaluating baseline", flush=True)
         baseline_loss = eval_baseline(model, chunks, cfg.batch_size, device)
         results["modes"].setdefault(split_name, {})
         results["modes"][split_name]["baseline"] = {
@@ -830,12 +871,19 @@ def main() -> None:
 
         for mode in BASE_DECOMP_MODES:
             collect_stats = split_name in {"val", "test"} and mode == "full"
+            mode_start = time.time()
+            print(
+                f"  [{split_name}] evaluating mode={mode} collect_stats={collect_stats}",
+                flush=True,
+            )
             metrics = eval_algorithmic_decomp(
                 wrapped,
                 chunks,
                 cfg.batch_size,
                 mode=mode,
                 collect_algorithmic_stats=collect_stats,
+                split_name=split_name,
+                progress_every=max(0, int(args.progress_every)),
             )
             loss = metrics["loss"]
             imp = baseline_loss - loss
@@ -854,7 +902,8 @@ def main() -> None:
                 f"  mode={mode:16s} "
                 f"loss={loss:.6f} "
                 f"imp={imp:.6f} "
-                f"ppl_red={100.0 * ppl_red:.3f}%"
+                f"ppl_red={100.0 * ppl_red:.3f}% "
+                f"elapsed={time.time() - mode_start:.1f}s"
             )
 
         add_recovery_metrics(results["modes"][split_name])
@@ -883,6 +932,7 @@ def main() -> None:
                     freqs.append((name, stats[key]))
             for name, frac in sorted(freqs, key=lambda x: x[1], reverse=True)[:5]:
                 print(f"    {name:16s} {100.0 * frac:.2f}%")
+        print(f"[{split_name}] done elapsed={time.time() - split_start:.1f}s", flush=True)
 
     out = Path(args.output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
