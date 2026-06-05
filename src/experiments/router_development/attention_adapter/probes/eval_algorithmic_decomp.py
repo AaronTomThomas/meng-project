@@ -662,7 +662,14 @@ def main() -> None:
     parser.add_argument("--eps", type=float, default=1e-8)
 
     # These are passed directly into the imported LearnerHyperParams dataclass.
-    parser.add_argument("--beta_soft", type=float, default=default_hp.beta_soft)
+    parser.add_argument(
+        "--local_kernel_beta",
+        "--beta_soft",
+        dest="local_kernel_beta",
+        type=float,
+        default=default_hp.local_kernel_beta,
+        help="Local kernel beta for weighted local-linear learners. --beta_soft is kept as a deprecated alias.",
+    )
     parser.add_argument("--window_size", type=int, default=default_hp.window_size)
     parser.add_argument("--k_knn_mean", type=int, default=default_hp.k_knn_mean)
     parser.add_argument("--learner_ridge_lambda", type=float, default=default_hp.ridge_lambda)
@@ -712,7 +719,7 @@ def main() -> None:
         raise ValueError("Do not include 'soft' as a candidate direction; it gives a zero direction.")
 
     learner_hparams = LearnerHyperParams(
-        beta_soft=args.beta_soft,
+        local_kernel_beta=args.local_kernel_beta,
         window_size=args.window_size,
         k_knn_mean=args.k_knn_mean,
         ridge_lambda=args.learner_ridge_lambda,
