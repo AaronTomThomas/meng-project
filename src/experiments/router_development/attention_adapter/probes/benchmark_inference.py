@@ -30,7 +30,7 @@ import random
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,7 @@ from experiments.router_development.attention_adapter.config import (
     AdapterMethod,
     config_from_values,
 )
+from experiments.router_development.attention_adapter.adapters.lora_adapters import OfficialPEFTAdapter
 from experiments.router_development.attention_adapter.models import DEFAULT_FAMILY_SPECS
 from experiments.router_development.attention_adapter.peft_factory import build_wrapped_model
 from experiments.router_development.attention_adapter.trainer import (
@@ -82,6 +83,7 @@ def dtype_context(dtype_name: str, device: torch.device):
 
 def build_base_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
     model = AutoModelForCausalLM.from_pretrained(args.model_name).to(device)
+    model.config.use_cache = False
     model.eval()
     for param in model.parameters():
         param.requires_grad_(False)
@@ -101,10 +103,15 @@ def maybe_load_checkpoint(wrapped: nn.Module, checkpoint_path: str, device: torc
     if not checkpoint_path:
         return
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    if "trainable_state_dict" not in checkpoint:
-        raise KeyError(f"{checkpoint_path} does not contain 'trainable_state_dict'")
+    state = (
+        checkpoint["trainable_state_dict"]
+        if isinstance(checkpoint, Mapping) and "trainable_state_dict" in checkpoint
+        else checkpoint
+    )
+    if not isinstance(state, Mapping):
+        raise TypeError(f"{checkpoint_path} must contain a trainable state dict mapping")
     scope = TrainableParameters(params=[], frozen_before_training={}, check_frozen=False)
-    scope.load_trainable_state_dict(wrapped, checkpoint["trainable_state_dict"])
+    scope.load_trainable_state_dict(wrapped, state)
     print(f"[checkpoint] loaded trainable weights from {checkpoint_path}")
 
 
@@ -155,7 +162,12 @@ def build_method_model(
 
 @torch.inference_mode()
 def run_forward(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
-    output = model(input_ids)
+    if isinstance(model, OfficialPEFTAdapter):
+        output = model.model(input_ids=input_ids.to(model.device), use_cache=False)
+    elif hasattr(model, "set_peft_eval_mode"):
+        output = model(input_ids)
+    else:
+        output = model(input_ids=input_ids, use_cache=False)
     if hasattr(output, "logits"):
         return output.logits
     return output
@@ -300,7 +312,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--bottleneck_dim", type=int, default=0)
     parser.add_argument("--adapter_dropout", type=float, default=0.0)
-    parser.add_argument("--output_scale", type=float, default=0.05)
+    parser.add_argument("--output_scale", type=float, default=None)
 
     parser.add_argument("--peft_target_profile", type=str, default="")
     parser.add_argument("--lora_rank", type=int, default=4)
@@ -336,6 +348,8 @@ def resolve_defaults(args: argparse.Namespace) -> None:
         args.batch_size = defaults.default_batch_size
     if args.bottleneck_dim <= 0:
         args.bottleneck_dim = defaults.default_bottleneck_dim
+    if args.output_scale is None:
+        args.output_scale = defaults.default_output_scale
     if not args.peft_target_profile:
         args.peft_target_profile = defaults.default_peft_target_profile
 

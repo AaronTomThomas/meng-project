@@ -261,7 +261,7 @@ def train_one_epoch(
             optimizer.zero_grad(set_to_none=True)
         total_loss += float(loss_sum.item())
         total_tokens += tokens
-        if step % 500 == 0:
+        if step % 10 == 0:
             print(f"[Epoch {epoch}] Step {step}/ {len(loader)}: loss = {total_loss / max(1, total_tokens)}")
     if len(loader) % gradient_accumulation_steps != 0:
         if grad_clip > 0:
