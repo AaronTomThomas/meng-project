@@ -200,6 +200,7 @@ class PEFTComparisonConfig(LearnerHyperParams):
     mlp_attention_hidden_dim: int = 768
     mlp_attention_depth: int = 2
     mlp_attention_dropout: float = 0.05
+    mlp_attention_zero_init: bool = True
 
     # Official PEFT options.
     peft_target_profile: str = "attn_c_proj"
@@ -649,6 +650,7 @@ class QKVToZMLP(nn.Module):
         mlp_hidden_dim: int,
         depth: int,
         dropout: float,
+        zero_init_output: bool,
     ):
         super().__init__()
         if depth < 1:
@@ -665,10 +667,14 @@ class QKVToZMLP(nn.Module):
         layers.append(nn.Linear(in_dim, hidden_size))
         self.net = nn.Sequential(*layers)
 
-        for module in self.net:
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
-                nn.init.zeros_(module.bias)
+        linear_layers = [module for module in self.net if isinstance(module, nn.Linear)]
+        for module in linear_layers:
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.zeros_(module.bias)
+
+        if zero_init_output:
+            nn.init.zeros_(linear_layers[-1].weight)
+            nn.init.zeros_(linear_layers[-1].bias)
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # q/k/v are [B, H, T, D]. Merge heads before the token-wise MLP.
@@ -709,6 +715,7 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
                     mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
                     depth=cfg.mlp_attention_depth,
                     dropout=cfg.mlp_attention_dropout,
+                    zero_init_output=cfg.mlp_attention_zero_init,
                 )
                 for layer_idx in self.layer_indices
             }
@@ -1453,6 +1460,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp_attention_hidden_dim", type=int, default=768)
     parser.add_argument("--mlp_attention_depth", type=int, default=2)
     parser.add_argument("--mlp_attention_dropout", type=float, default=0.05)
+    parser.add_argument("--mlp_attention_zero_init", action="store_true")
+    parser.add_argument("--no_mlp_attention_zero_init", dest="mlp_attention_zero_init", action="store_false")
+    parser.set_defaults(mlp_attention_zero_init=True)
 
     # Official PEFT options.
     parser.add_argument("--peft_target_profile", type=str, default="attn_c_proj", choices=ALL_TARGET_PROFILES)
@@ -1531,6 +1541,7 @@ def main() -> None:
         mlp_attention_hidden_dim=args.mlp_attention_hidden_dim,
         mlp_attention_depth=args.mlp_attention_depth,
         mlp_attention_dropout=args.mlp_attention_dropout,
+        mlp_attention_zero_init=args.mlp_attention_zero_init,
         peft_target_profile=args.peft_target_profile,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
