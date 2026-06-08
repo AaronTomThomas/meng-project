@@ -127,6 +127,7 @@ from typing import Any, Dict, List, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from experiments.attention_learners import LearnerHyperParams
@@ -209,6 +210,8 @@ class PEFTComparisonConfig(LearnerHyperParams):
     mlp_attention_dropout: float = 0.05
     mlp_attention_zero_init: bool = True
     mlp_attention_noop_init: bool = True
+    mlp_attention_query_chunk_size: int = 32
+    mlp_attention_checkpoint_pairs: bool = True
 
     # Official PEFT options.
     peft_target_profile: str = "attn_c_proj"
@@ -799,6 +802,8 @@ class PerHeadPairwiseMLPAttention(nn.Module):
         dropout: float,
         zero_init_output: bool,
         noop_init: bool,
+        query_chunk_size: int,
+        checkpoint_pairs: bool,
     ):
         super().__init__()
         if depth < 1:
@@ -807,6 +812,8 @@ class PerHeadPairwiseMLPAttention(nn.Module):
         self.num_heads = int(num_heads)
         self.head_dim = int(head_dim)
         self.noop_init = bool(noop_init)
+        self.query_chunk_size = int(query_chunk_size)
+        self.checkpoint_pairs = bool(checkpoint_pairs)
         self.score_mlps = nn.ModuleList(
             [
                 self._build_score_mlp(
@@ -851,38 +858,77 @@ class PerHeadPairwiseMLPAttention(nn.Module):
 
         return net
 
+    def _head_chunk(
+        self,
+        score_mlp: nn.Module,
+        q_chunk: torch.Tensor,
+        k_head: torch.Tensor,
+        v_head: torch.Tensor,
+        query_start: int,
+    ) -> torch.Tensor:
+        _, query_len, head_dim = q_chunk.shape
+        seq_len = k_head.shape[1]
+
+        q_pair = q_chunk.unsqueeze(2).expand(-1, -1, seq_len, -1)
+        k_pair = k_head.unsqueeze(1).expand(-1, query_len, -1, -1)
+        pair_features = torch.cat(
+            [
+                q_pair,
+                k_pair,
+                q_pair * k_pair,
+                q_pair - k_pair,
+            ],
+            dim=-1,
+        )
+        learned_scores = score_mlp(pair_features).squeeze(-1)
+        if self.noop_init:
+            dot_scores = torch.matmul(q_chunk, k_head.transpose(-1, -2)) / math.sqrt(float(head_dim))
+            scores = dot_scores + learned_scores
+        else:
+            scores = learned_scores
+
+        query_positions = torch.arange(
+            query_start,
+            query_start + query_len,
+            dtype=torch.long,
+            device=q_chunk.device,
+        )
+        key_positions = torch.arange(seq_len, dtype=torch.long, device=q_chunk.device)
+        causal_mask = key_positions.view(1, -1) <= query_positions.view(-1, 1)
+        scores = scores.masked_fill(~causal_mask.view(1, query_len, seq_len), torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=-1)
+        return torch.matmul(weights, v_head)
+
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # q/k/v are [B, H, T, D]. Score all causal query-key pairs per head.
-        _, _, seq_len, head_dim = q.shape
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=q.device))
+        # q/k/v are [B, H, T, D]. Score causal query-key pairs per head.
+        _, _, seq_len, _ = q.shape
+        chunk_size = self.query_chunk_size if self.query_chunk_size > 0 else seq_len
         z_heads = []
 
         for head_idx, score_mlp in enumerate(self.score_mlps):
             q_head = q[:, head_idx, :, :]
             k_head = k[:, head_idx, :, :]
             v_head = v[:, head_idx, :, :]
+            z_chunks = []
 
-            q_pair = q_head.unsqueeze(2).expand(-1, -1, seq_len, -1)
-            k_pair = k_head.unsqueeze(1).expand(-1, seq_len, -1, -1)
-            pair_features = torch.cat(
-                [
-                    q_pair,
-                    k_pair,
-                    q_pair * k_pair,
-                    q_pair - k_pair,
-                ],
-                dim=-1,
-            )
-            learned_scores = score_mlp(pair_features).squeeze(-1)
-            if self.noop_init:
-                dot_scores = torch.matmul(q_head, k_head.transpose(-1, -2)) / math.sqrt(float(head_dim))
-                scores = dot_scores + learned_scores
-            else:
-                scores = learned_scores
+            for query_start in range(0, seq_len, chunk_size):
+                q_chunk = q_head[:, query_start : query_start + chunk_size, :]
+                if self.checkpoint_pairs and self.training and torch.is_grad_enabled():
+                    def chunk_fn(q_chunk_: torch.Tensor, k_head_: torch.Tensor, v_head_: torch.Tensor) -> torch.Tensor:
+                        return self._head_chunk(score_mlp, q_chunk_, k_head_, v_head_, query_start)
 
-            scores = scores.masked_fill(~causal_mask.view(1, seq_len, seq_len), torch.finfo(scores.dtype).min)
-            weights = torch.softmax(scores, dim=-1)
-            z_heads.append(torch.matmul(weights, v_head))
+                    z_chunk = torch.utils.checkpoint.checkpoint(
+                        chunk_fn,
+                        q_chunk,
+                        k_head,
+                        v_head,
+                        use_reentrant=False,
+                    )
+                else:
+                    z_chunk = self._head_chunk(score_mlp, q_chunk, k_head, v_head, query_start)
+                z_chunks.append(z_chunk)
+
+            z_heads.append(torch.cat(z_chunks, dim=1))
 
         return merge_heads(torch.stack(z_heads, dim=1))
 
@@ -926,6 +972,8 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
                     dropout=cfg.mlp_attention_dropout,
                     zero_init_output=cfg.mlp_attention_zero_init,
                     noop_init=cfg.mlp_attention_noop_init,
+                    query_chunk_size=cfg.mlp_attention_query_chunk_size,
+                    checkpoint_pairs=cfg.mlp_attention_checkpoint_pairs,
                 )
             if cfg.method == "mlp_attention_heads":
                 return PerHeadQKVToZMLP(
@@ -1697,6 +1745,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp_attention_noop_init", action="store_true")
     parser.add_argument("--no_mlp_attention_noop_init", dest="mlp_attention_noop_init", action="store_false")
     parser.set_defaults(mlp_attention_noop_init=True)
+    parser.add_argument("--mlp_attention_query_chunk_size", type=int, default=32)
+    parser.add_argument("--mlp_attention_checkpoint_pairs", action="store_true")
+    parser.add_argument("--no_mlp_attention_checkpoint_pairs", dest="mlp_attention_checkpoint_pairs", action="store_false")
+    parser.set_defaults(mlp_attention_checkpoint_pairs=True)
 
     # Official PEFT options.
     parser.add_argument("--peft_target_profile", type=str, default="attn_c_proj", choices=ALL_TARGET_PROFILES)
@@ -1777,6 +1829,8 @@ def main() -> None:
         mlp_attention_dropout=args.mlp_attention_dropout,
         mlp_attention_zero_init=args.mlp_attention_zero_init,
         mlp_attention_noop_init=args.mlp_attention_noop_init,
+        mlp_attention_query_chunk_size=args.mlp_attention_query_chunk_size,
+        mlp_attention_checkpoint_pairs=args.mlp_attention_checkpoint_pairs,
         peft_target_profile=args.peft_target_profile,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
