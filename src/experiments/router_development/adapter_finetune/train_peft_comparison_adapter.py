@@ -222,6 +222,7 @@ class PEFTComparisonConfig(LearnerHyperParams):
     epochs: int = 500
     patience: int = 30
     eval_every: int = 1
+    log_every_steps: int = 10
     grad_clip: float = 1.0
 
     seed: int = 0
@@ -1058,11 +1059,15 @@ def train(cfg: PEFTComparisonConfig) -> None:
         print(f"  {k}: {v}")
     print(f"  parsed_layer_indices: {layer_indices}")
 
+    print()
+    print(f"[model] loading tokenizer: {cfg.model_name}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print(f"[model] loading base model: {cfg.model_name}", flush=True)
     model = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
+    print(f"[model] loaded base model on {device}", flush=True)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -1073,13 +1078,24 @@ def train(cfg: PEFTComparisonConfig) -> None:
             raise ValueError(f"layer_idx={layer_idx} out of range for n_layers={n_layers}")
 
     print()
-    print("[data] loading train/val/test chunks separately")
+    print("[data] loading train/val/test chunks separately", flush=True)
+    print(
+        f"[data] loading train split={cfg.train_split} "
+        f"max_texts={cfg.max_train_texts} max_chunks={cfg.max_train_chunks}",
+        flush=True,
+    )
     train_chunks = load_chunks_for_split(
         cfg,
         tokenizer,
         split=cfg.train_split,
         max_texts=cfg.max_train_texts,
         max_chunks=cfg.max_train_chunks,
+    )
+    print(f"[data] loaded train chunks={train_chunks.shape[0]} block_size={train_chunks.shape[1]}", flush=True)
+    print(
+        f"[data] loading val split={cfg.val_split} "
+        f"max_texts={cfg.max_val_texts} max_chunks={cfg.max_val_chunks}",
+        flush=True,
     )
     val_chunks = load_chunks_for_split(
         cfg,
@@ -1088,6 +1104,12 @@ def train(cfg: PEFTComparisonConfig) -> None:
         max_texts=cfg.max_val_texts,
         max_chunks=cfg.max_val_chunks,
     )
+    print(f"[data] loaded val chunks={val_chunks.shape[0]} block_size={val_chunks.shape[1]}", flush=True)
+    print(
+        f"[data] loading test split={cfg.test_split} "
+        f"max_texts={cfg.max_test_texts} max_chunks={cfg.max_test_chunks}",
+        flush=True,
+    )
     test_chunks = load_chunks_for_split(
         cfg,
         tokenizer,
@@ -1095,22 +1117,36 @@ def train(cfg: PEFTComparisonConfig) -> None:
         max_texts=cfg.max_test_texts,
         max_chunks=cfg.max_test_chunks,
     )
+    print(f"[data] loaded test chunks={test_chunks.shape[0]} block_size={test_chunks.shape[1]}", flush=True)
 
     print(f"[data] train chunks={train_chunks.shape[0]} block_size={train_chunks.shape[1]}")
     print(f"[data] val   chunks={val_chunks.shape[0]} block_size={val_chunks.shape[1]}")
     print(f"[data] test  chunks={test_chunks.shape[0]} block_size={test_chunks.shape[1]}")
 
+    print("[baseline] evaluating train split", flush=True)
     baseline_train = eval_baseline(model, train_chunks, cfg.batch_size, device)
+    print(f"[baseline] train_loss={baseline_train:.6f}", flush=True)
+    print("[baseline] evaluating val split", flush=True)
     baseline_val = eval_baseline(model, val_chunks, cfg.batch_size, device)
+    print(f"[baseline] val_loss={baseline_val:.6f}", flush=True)
+    print("[baseline] evaluating test split", flush=True)
     baseline_test = eval_baseline(model, test_chunks, cfg.batch_size, device)
+    print(f"[baseline] test_loss={baseline_test:.6f}", flush=True)
 
+    print(f"[model] building wrapped method={cfg.method}", flush=True)
     wrapped = build_wrapped_model(model=model, cfg=cfg, layer_indices=layer_indices).to(device)
     num_trainable = sum(p.numel() for p in trainable_parameters(wrapped))
-    print(f"[model] trainable_params={num_trainable}")
+    print(f"[model] trainable_params={num_trainable}", flush=True)
 
+    print("[wrapped@init] evaluating train split", flush=True)
     init_train = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False)
+    print(f"[wrapped@init] train_loss={init_train['loss']:.6f}", flush=True)
+    print("[wrapped@init] evaluating val split", flush=True)
     init_val = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
+    print(f"[wrapped@init] val_loss={init_val['loss']:.6f}", flush=True)
+    print("[wrapped@init] evaluating test split", flush=True)
     init_test = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False)
+    print(f"[wrapped@init] test_loss={init_test['loss']:.6f}", flush=True)
 
     print()
     print(
@@ -1143,6 +1179,7 @@ def train(cfg: PEFTComparisonConfig) -> None:
     best_state: Dict[str, Any] | None = None
     bad_epochs = 0
     history: List[Dict[str, Any]] = []
+    global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
         wrapped.set_peft_train_mode()
@@ -1150,6 +1187,8 @@ def train(cfg: PEFTComparisonConfig) -> None:
         perm = torch.randperm(train_chunks.shape[0])
         total_loss = 0.0
         total_examples = 0
+        running_loss = 0.0
+        running_examples = 0
 
         for sl in batch_slices(perm.numel(), cfg.batch_size):
             idx = perm[sl]
@@ -1178,12 +1217,31 @@ def train(cfg: PEFTComparisonConfig) -> None:
 
             total_loss += float(loss.item()) * input_ids.shape[0]
             total_examples += input_ids.shape[0]
+            running_loss += float(loss.item()) * input_ids.shape[0]
+            running_examples += input_ids.shape[0]
+            global_step += 1
+
+            if cfg.log_every_steps > 0 and global_step % cfg.log_every_steps == 0:
+                running_avg = running_loss / max(1, running_examples)
+                epoch_avg = total_loss / max(1, total_examples)
+                print(
+                    f"[step {global_step:06d}] "
+                    f"epoch={epoch:03d} "
+                    f"examples={total_examples}/{train_chunks.shape[0]} "
+                    f"batch_loss={float(loss.item()):.6f} "
+                    f"running_loss={running_avg:.6f} "
+                    f"epoch_loss={epoch_avg:.6f}",
+                    flush=True,
+                )
+                running_loss = 0.0
+                running_examples = 0
 
         train_loss = total_loss / max(1, total_examples)
         row: Dict[str, Any] = {"epoch": epoch, "train_loss": train_loss}
 
         do_eval = epoch == 1 or epoch % cfg.eval_every == 0 or epoch == cfg.epochs
         if do_eval:
+            print(f"[eval] epoch={epoch:03d} evaluating val split", flush=True)
             val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
             val_loss = val_metrics["loss"]
             val_imp = baseline_val - val_loss
@@ -1195,6 +1253,7 @@ def train(cfg: PEFTComparisonConfig) -> None:
             test_metrics = None
             test_imp = None
             if cfg.eval_test_during_training:
+                print(f"[eval] epoch={epoch:03d} evaluating test split", flush=True)
                 test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False)
                 test_imp = baseline_test - test_metrics["loss"]
                 row["test_loss_exploratory"] = test_metrics["loss"]
@@ -1230,15 +1289,15 @@ def train(cfg: PEFTComparisonConfig) -> None:
                 f"peft_abs={val_metrics.get('delta_abs_mean', val_metrics.get('z_pred_abs_mean', val_metrics.get('peft_param_abs_mean', 0.0))):.6f} "
                 f"peft_l2={val_metrics.get('delta_l2_rms', val_metrics.get('z_pred_l2_rms', val_metrics.get('peft_param_l2_rms', 0.0))):.6f}"
             )
-            print(msg)
+            print(msg, flush=True)
 
             history.append(row)
 
             if bad_epochs >= cfg.patience:
-                print(f"[early_stop] no val improvement for {bad_epochs} evals")
+                print(f"[early_stop] no val improvement for {bad_epochs} evals", flush=True)
                 break
         else:
-            print(f"[epoch {epoch:03d}] train={train_loss:.6f}")
+            print(f"[epoch {epoch:03d}] train={train_loss:.6f}", flush=True)
             history.append(row)
 
     if best_state is None:
@@ -1250,8 +1309,11 @@ def train(cfg: PEFTComparisonConfig) -> None:
 
     load_trainable_state_dict(wrapped, best_state["trainable_state_dict"])
 
+    print("[best] evaluating train split", flush=True)
     best_train_metrics = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False)
+    print("[best] evaluating val split", flush=True)
     best_val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
+    print("[best] evaluating test split", flush=True)
     best_test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=True)
 
     train_imp = baseline_train - best_train_metrics["loss"]
@@ -1300,6 +1362,7 @@ def train(cfg: PEFTComparisonConfig) -> None:
     out = Path(cfg.output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    print(f"[done] saving checkpoint: {out}", flush=True)
     torch.save(
         {
             "summary": summary,
@@ -1386,6 +1449,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--eval_every", type=int, default=1)
+    parser.add_argument(
+        "--log_every_steps",
+        type=int,
+        default=10,
+        help="Print training loss every N optimizer steps. Set <=0 to disable.",
+    )
     parser.add_argument("--grad_clip", type=float, default=1.0)
 
     parser.add_argument("--seed", type=int, default=0)
@@ -1452,6 +1521,7 @@ def main() -> None:
         epochs=args.epochs,
         patience=args.patience,
         eval_every=args.eval_every,
+        log_every_steps=args.log_every_steps,
         grad_clip=args.grad_clip,
         seed=args.seed,
         device=args.device,
