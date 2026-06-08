@@ -133,7 +133,14 @@ from experiments.attention_learners import LearnerHyperParams
 from experiments.gpt2_probe_utils import load_and_pack_texts
 
 
-METHODS = ["akaza_freez", "lora", "ia3", "mlp_attention", "mlp_attention_heads"]
+METHODS = [
+    "akaza_freez",
+    "lora",
+    "ia3",
+    "mlp_attention",
+    "mlp_attention_heads",
+    "mlp_set_attention_heads",
+]
 
 # These are GPT-2 module suffixes under model.transformer.h.<layer>.
 LORA_TARGET_PROFILES: Dict[str, List[str]] = {
@@ -770,6 +777,116 @@ class PerHeadQKVToZMLP(nn.Module):
         return merge_heads(torch.stack(z_heads, dim=1))
 
 
+class PerHeadPairwiseMLPAttention(nn.Module):
+    """
+    Per-head learned set attention over the causal prefix.
+
+    For each head and query/key pair, the score MLP sees:
+
+        [q_t, k_j, q_t * k_j, q_t - k_j]
+
+    By default this is initialized as an exact no-op by predicting a zero score
+    delta on top of GPT-2's dot-product attention logits.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_heads: int,
+        head_dim: int,
+        mlp_hidden_dim: int,
+        depth: int,
+        dropout: float,
+        zero_init_output: bool,
+        noop_init: bool,
+    ):
+        super().__init__()
+        if depth < 1:
+            raise ValueError("mlp_attention_depth must be >= 1")
+
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.noop_init = bool(noop_init)
+        self.score_mlps = nn.ModuleList(
+            [
+                self._build_score_mlp(
+                    head_dim=head_dim,
+                    mlp_hidden_dim=mlp_hidden_dim,
+                    depth=depth,
+                    dropout=dropout,
+                    zero_init_output=zero_init_output,
+                )
+                for _ in range(num_heads)
+            ]
+        )
+
+    @staticmethod
+    def _build_score_mlp(
+        *,
+        head_dim: int,
+        mlp_hidden_dim: int,
+        depth: int,
+        dropout: float,
+        zero_init_output: bool,
+    ) -> nn.Sequential:
+        layers: List[nn.Module] = []
+        in_dim = 4 * head_dim
+        for _ in range(depth - 1):
+            layers.append(nn.Linear(in_dim, mlp_hidden_dim))
+            layers.append(nn.GELU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = mlp_hidden_dim
+        layers.append(nn.Linear(in_dim, 1))
+        net = nn.Sequential(*layers)
+
+        linear_layers = [module for module in net if isinstance(module, nn.Linear)]
+        for module in linear_layers:
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.zeros_(module.bias)
+
+        if zero_init_output:
+            nn.init.zeros_(linear_layers[-1].weight)
+            nn.init.zeros_(linear_layers[-1].bias)
+
+        return net
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        # q/k/v are [B, H, T, D]. Score all causal query-key pairs per head.
+        _, _, seq_len, head_dim = q.shape
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=q.device))
+        z_heads = []
+
+        for head_idx, score_mlp in enumerate(self.score_mlps):
+            q_head = q[:, head_idx, :, :]
+            k_head = k[:, head_idx, :, :]
+            v_head = v[:, head_idx, :, :]
+
+            q_pair = q_head.unsqueeze(2).expand(-1, -1, seq_len, -1)
+            k_pair = k_head.unsqueeze(1).expand(-1, seq_len, -1, -1)
+            pair_features = torch.cat(
+                [
+                    q_pair,
+                    k_pair,
+                    q_pair * k_pair,
+                    q_pair - k_pair,
+                ],
+                dim=-1,
+            )
+            learned_scores = score_mlp(pair_features).squeeze(-1)
+            if self.noop_init:
+                dot_scores = torch.matmul(q_head, k_head.transpose(-1, -2)) / math.sqrt(float(head_dim))
+                scores = dot_scores + learned_scores
+            else:
+                scores = learned_scores
+
+            scores = scores.masked_fill(~causal_mask.view(1, seq_len, seq_len), torch.finfo(scores.dtype).min)
+            weights = torch.softmax(scores, dim=-1)
+            z_heads.append(torch.matmul(weights, v_head))
+
+        return merge_heads(torch.stack(z_heads, dim=1))
+
+
 class GPT2MLPAttentionReplacementModel(nn.Module):
     """
     Frozen GPT-2 with selected layers' soft attention replaced by QKV -> z MLPs.
@@ -798,29 +915,37 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
         hidden_size = int(model.config.n_embd)
         num_heads = int(model.config.n_head)
         head_dim = hidden_size // num_heads
-        adapter_cls = PerHeadQKVToZMLP if cfg.method == "mlp_attention_heads" else QKVToZMLP
-        self.adapters = nn.ModuleDict(
-            {
-                str(layer_idx): (
-                    adapter_cls(
-                        num_heads=num_heads,
-                        head_dim=head_dim,
-                        mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
-                        depth=cfg.mlp_attention_depth,
-                        dropout=cfg.mlp_attention_dropout,
-                        zero_init_output=cfg.mlp_attention_zero_init,
-                    )
-                    if cfg.method == "mlp_attention_heads"
-                    else adapter_cls(
-                        hidden_size=hidden_size,
-                        mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
-                        depth=cfg.mlp_attention_depth,
-                        dropout=cfg.mlp_attention_dropout,
-                        zero_init_output=cfg.mlp_attention_zero_init,
-                    )
+
+        def build_adapter() -> nn.Module:
+            if cfg.method == "mlp_set_attention_heads":
+                return PerHeadPairwiseMLPAttention(
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
+                    depth=cfg.mlp_attention_depth,
+                    dropout=cfg.mlp_attention_dropout,
+                    zero_init_output=cfg.mlp_attention_zero_init,
+                    noop_init=cfg.mlp_attention_noop_init,
                 )
-                for layer_idx in self.layer_indices
-            }
+            if cfg.method == "mlp_attention_heads":
+                return PerHeadQKVToZMLP(
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
+                    depth=cfg.mlp_attention_depth,
+                    dropout=cfg.mlp_attention_dropout,
+                    zero_init_output=cfg.mlp_attention_zero_init,
+                )
+            return QKVToZMLP(
+                hidden_size=hidden_size,
+                mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
+                depth=cfg.mlp_attention_depth,
+                dropout=cfg.mlp_attention_dropout,
+                zero_init_output=cfg.mlp_attention_zero_init,
+            )
+
+        self.adapters = nn.ModuleDict(
+            {str(layer_idx): build_adapter() for layer_idx in self.layer_indices}
         )
         for p in self.adapters.parameters():
             p.requires_grad_(True)
@@ -863,7 +988,10 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
 
         attn = block.attn
         adapter_out = self.adapters[str(layer_idx)](q, k, v).to(z_soft.dtype)
-        z_pred = z_soft + adapter_out if self.cfg.mlp_attention_noop_init else adapter_out
+        if self.cfg.method == "mlp_set_attention_heads":
+            z_pred = adapter_out
+        else:
+            z_pred = z_soft + adapter_out if self.cfg.mlp_attention_noop_init else adapter_out
         attn_output = attn.c_proj(z_pred)
         attn_output = attn.resid_dropout(attn_output)
         hidden_states = residual + attn_output
@@ -1165,7 +1293,7 @@ def build_wrapped_model(
 ) -> AKAZAFreeZModel | GPT2MLPAttentionReplacementModel | OfficialPEFTWrapper:
     if cfg.method == "akaza_freez":
         return AKAZAFreeZModel(model=model, cfg=cfg, layer_indices=layer_indices)
-    if cfg.method in {"mlp_attention", "mlp_attention_heads"}:
+    if cfg.method in {"mlp_attention", "mlp_attention_heads", "mlp_set_attention_heads"}:
         return GPT2MLPAttentionReplacementModel(model=model, cfg=cfg, layer_indices=layer_indices)
     if cfg.method in {"lora", "ia3"}:
         return build_official_peft_model(model=model, cfg=cfg, layer_indices=layer_indices)
