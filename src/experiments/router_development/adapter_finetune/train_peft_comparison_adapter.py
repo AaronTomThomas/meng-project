@@ -133,7 +133,7 @@ from experiments.attention_learners import LearnerHyperParams
 from experiments.gpt2_probe_utils import load_and_pack_texts
 
 
-METHODS = ["akaza_freez", "lora", "ia3", "mlp_attention"]
+METHODS = ["akaza_freez", "lora", "ia3", "mlp_attention", "mlp_attention_heads"]
 
 # These are GPT-2 module suffixes under model.transformer.h.<layer>.
 LORA_TARGET_PROFILES: Dict[str, List[str]] = {
@@ -201,6 +201,7 @@ class PEFTComparisonConfig(LearnerHyperParams):
     mlp_attention_depth: int = 2
     mlp_attention_dropout: float = 0.05
     mlp_attention_zero_init: bool = True
+    mlp_attention_noop_init: bool = True
 
     # Official PEFT options.
     peft_target_profile: str = "attn_c_proj"
@@ -682,13 +683,100 @@ class QKVToZMLP(nn.Module):
         return self.net(x)
 
 
+class PerHeadQKVToZMLP(nn.Module):
+    """
+    Per-head MLP replacement for GPT-2's soft attention map.
+
+    Each head gets an independent token-wise MLP:
+
+        concat(q_h, k_h, v_h) -> z_h
+
+    The predicted per-head outputs are then merged to GPT-2's pre-c_proj z.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_heads: int,
+        head_dim: int,
+        mlp_hidden_dim: int,
+        depth: int,
+        dropout: float,
+        zero_init_output: bool,
+    ):
+        super().__init__()
+        if depth < 1:
+            raise ValueError("mlp_attention_depth must be >= 1")
+
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.head_mlps = nn.ModuleList(
+            [
+                self._build_head_mlp(
+                    head_dim=head_dim,
+                    mlp_hidden_dim=mlp_hidden_dim,
+                    depth=depth,
+                    dropout=dropout,
+                    zero_init_output=zero_init_output,
+                )
+                for _ in range(num_heads)
+            ]
+        )
+
+    @staticmethod
+    def _build_head_mlp(
+        *,
+        head_dim: int,
+        mlp_hidden_dim: int,
+        depth: int,
+        dropout: float,
+        zero_init_output: bool,
+    ) -> nn.Sequential:
+        layers: List[nn.Module] = []
+        in_dim = 3 * head_dim
+        for _ in range(depth - 1):
+            layers.append(nn.Linear(in_dim, mlp_hidden_dim))
+            layers.append(nn.GELU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = mlp_hidden_dim
+        layers.append(nn.Linear(in_dim, head_dim))
+        net = nn.Sequential(*layers)
+
+        linear_layers = [module for module in net if isinstance(module, nn.Linear)]
+        for module in linear_layers:
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.zeros_(module.bias)
+
+        if zero_init_output:
+            nn.init.zeros_(linear_layers[-1].weight)
+            nn.init.zeros_(linear_layers[-1].bias)
+
+        return net
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        # q/k/v are [B, H, T, D]. Predict each head independently, then merge.
+        z_heads = []
+        for head_idx, head_mlp in enumerate(self.head_mlps):
+            x_head = torch.cat(
+                [
+                    q[:, head_idx, :, :],
+                    k[:, head_idx, :, :],
+                    v[:, head_idx, :, :],
+                ],
+                dim=-1,
+            )
+            z_heads.append(head_mlp(x_head))
+        return merge_heads(torch.stack(z_heads, dim=1))
+
+
 class GPT2MLPAttentionReplacementModel(nn.Module):
     """
     Frozen GPT-2 with selected layers' soft attention replaced by QKV -> z MLPs.
 
     The GPT-2 q/k/v projection matrix and output projection are kept frozen.
-    Only the MLPs that predict the pre-output-projection attention value z are
-    trainable.
+    Only the MLPs are trainable. By default they are zero-initialized as a delta
+    on top of z_soft, so the wrapped model starts as an exact no-op.
     """
 
     def __init__(
@@ -708,14 +796,28 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
             p.requires_grad_(False)
 
         hidden_size = int(model.config.n_embd)
+        num_heads = int(model.config.n_head)
+        head_dim = hidden_size // num_heads
+        adapter_cls = PerHeadQKVToZMLP if cfg.method == "mlp_attention_heads" else QKVToZMLP
         self.adapters = nn.ModuleDict(
             {
-                str(layer_idx): QKVToZMLP(
-                    hidden_size=hidden_size,
-                    mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
-                    depth=cfg.mlp_attention_depth,
-                    dropout=cfg.mlp_attention_dropout,
-                    zero_init_output=cfg.mlp_attention_zero_init,
+                str(layer_idx): (
+                    adapter_cls(
+                        num_heads=num_heads,
+                        head_dim=head_dim,
+                        mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
+                        depth=cfg.mlp_attention_depth,
+                        dropout=cfg.mlp_attention_dropout,
+                        zero_init_output=cfg.mlp_attention_zero_init,
+                    )
+                    if cfg.method == "mlp_attention_heads"
+                    else adapter_cls(
+                        hidden_size=hidden_size,
+                        mlp_hidden_dim=cfg.mlp_attention_hidden_dim,
+                        depth=cfg.mlp_attention_depth,
+                        dropout=cfg.mlp_attention_dropout,
+                        zero_init_output=cfg.mlp_attention_zero_init,
+                    )
                 )
                 for layer_idx in self.layer_indices
             }
@@ -760,7 +862,8 @@ class GPT2MLPAttentionReplacementModel(nn.Module):
         residual, q, k, v, z_soft = self.attention_qkv_and_teacher_z(block=block, hidden_states=hidden_states)
 
         attn = block.attn
-        z_pred = self.adapters[str(layer_idx)](q, k, v).to(z_soft.dtype)
+        adapter_out = self.adapters[str(layer_idx)](q, k, v).to(z_soft.dtype)
+        z_pred = z_soft + adapter_out if self.cfg.mlp_attention_noop_init else adapter_out
         attn_output = attn.c_proj(z_pred)
         attn_output = attn.resid_dropout(attn_output)
         hidden_states = residual + attn_output
@@ -1062,7 +1165,7 @@ def build_wrapped_model(
 ) -> AKAZAFreeZModel | GPT2MLPAttentionReplacementModel | OfficialPEFTWrapper:
     if cfg.method == "akaza_freez":
         return AKAZAFreeZModel(model=model, cfg=cfg, layer_indices=layer_indices)
-    if cfg.method == "mlp_attention":
+    if cfg.method in {"mlp_attention", "mlp_attention_heads"}:
         return GPT2MLPAttentionReplacementModel(model=model, cfg=cfg, layer_indices=layer_indices)
     if cfg.method in {"lora", "ia3"}:
         return build_official_peft_model(model=model, cfg=cfg, layer_indices=layer_indices)
@@ -1463,6 +1566,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp_attention_zero_init", action="store_true")
     parser.add_argument("--no_mlp_attention_zero_init", dest="mlp_attention_zero_init", action="store_false")
     parser.set_defaults(mlp_attention_zero_init=True)
+    parser.add_argument("--mlp_attention_noop_init", action="store_true")
+    parser.add_argument("--no_mlp_attention_noop_init", dest="mlp_attention_noop_init", action="store_false")
+    parser.set_defaults(mlp_attention_noop_init=True)
 
     # Official PEFT options.
     parser.add_argument("--peft_target_profile", type=str, default="attn_c_proj", choices=ALL_TARGET_PROFILES)
@@ -1542,6 +1648,7 @@ def main() -> None:
         mlp_attention_depth=args.mlp_attention_depth,
         mlp_attention_dropout=args.mlp_attention_dropout,
         mlp_attention_zero_init=args.mlp_attention_zero_init,
+        mlp_attention_noop_init=args.mlp_attention_noop_init,
         peft_target_profile=args.peft_target_profile,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
