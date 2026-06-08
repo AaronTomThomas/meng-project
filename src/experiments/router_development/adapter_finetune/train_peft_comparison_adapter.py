@@ -976,16 +976,28 @@ def eval_baseline(
     chunks: torch.Tensor,
     batch_size: int,
     device: torch.device,
+    *,
+    label: str = "baseline",
+    log_every_batches: int = 10,
 ) -> float:
     model.eval()
     losses: List[float] = []
     n_examples = chunks.shape[0]
+    batches = batch_slices(n_examples, batch_size)
 
-    for sl in batch_slices(n_examples, batch_size):
+    for batch_idx, sl in enumerate(batches, start=1):
         input_ids = chunks[sl].to(device)
         logits = model(input_ids).logits
         loss = lm_loss(logits, input_ids)
         losses.append(float(loss.item()) * input_ids.shape[0])
+        if log_every_batches > 0 and (batch_idx % log_every_batches == 0 or batch_idx == len(batches)):
+            done = sl.stop
+            running = sum(losses) / max(1, done)
+            print(
+                f"[{label}] eval_batch={batch_idx}/{len(batches)} "
+                f"examples={done}/{n_examples} loss={running:.6f}",
+                flush=True,
+            )
 
     return sum(losses) / max(1, n_examples)
 
@@ -997,6 +1009,8 @@ def eval_wrapped(
     batch_size: int,
     *,
     collect_stats: bool = True,
+    label: str = "wrapped",
+    log_every_batches: int = 10,
 ) -> Dict[str, float]:
     wrapped.set_peft_eval_mode()
 
@@ -1004,8 +1018,9 @@ def eval_wrapped(
     stats_accum: Dict[str, float] = {}
     n_stats_batches = 0
     n_examples = chunks.shape[0]
+    batches = batch_slices(n_examples, batch_size)
 
-    for sl in batch_slices(n_examples, batch_size):
+    for batch_idx, sl in enumerate(batches, start=1):
         input_ids = chunks[sl].to(wrapped.device)
         logits = wrapped(input_ids)
         loss = lm_loss(logits, input_ids)
@@ -1016,6 +1031,14 @@ def eval_wrapped(
             for k, v in stats.items():
                 stats_accum[k] = stats_accum.get(k, 0.0) + float(v)
             n_stats_batches += 1
+        if log_every_batches > 0 and (batch_idx % log_every_batches == 0 or batch_idx == len(batches)):
+            done = sl.stop
+            running = sum(losses) / max(1, done)
+            print(
+                f"[{label}] eval_batch={batch_idx}/{len(batches)} "
+                f"examples={done}/{n_examples} loss={running:.6f}",
+                flush=True,
+            )
 
     out = {"loss": sum(losses) / max(1, n_examples)}
     if collect_stats:
@@ -1124,13 +1147,13 @@ def train(cfg: PEFTComparisonConfig) -> None:
     print(f"[data] test  chunks={test_chunks.shape[0]} block_size={test_chunks.shape[1]}")
 
     print("[baseline] evaluating train split", flush=True)
-    baseline_train = eval_baseline(model, train_chunks, cfg.batch_size, device)
+    baseline_train = eval_baseline(model, train_chunks, cfg.batch_size, device, label="baseline/train")
     print(f"[baseline] train_loss={baseline_train:.6f}", flush=True)
     print("[baseline] evaluating val split", flush=True)
-    baseline_val = eval_baseline(model, val_chunks, cfg.batch_size, device)
+    baseline_val = eval_baseline(model, val_chunks, cfg.batch_size, device, label="baseline/val")
     print(f"[baseline] val_loss={baseline_val:.6f}", flush=True)
     print("[baseline] evaluating test split", flush=True)
-    baseline_test = eval_baseline(model, test_chunks, cfg.batch_size, device)
+    baseline_test = eval_baseline(model, test_chunks, cfg.batch_size, device, label="baseline/test")
     print(f"[baseline] test_loss={baseline_test:.6f}", flush=True)
 
     print(f"[model] building wrapped method={cfg.method}", flush=True)
@@ -1139,13 +1162,13 @@ def train(cfg: PEFTComparisonConfig) -> None:
     print(f"[model] trainable_params={num_trainable}", flush=True)
 
     print("[wrapped@init] evaluating train split", flush=True)
-    init_train = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False)
+    init_train = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False, label="wrapped_init/train")
     print(f"[wrapped@init] train_loss={init_train['loss']:.6f}", flush=True)
     print("[wrapped@init] evaluating val split", flush=True)
-    init_val = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
+    init_val = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True, label="wrapped_init/val")
     print(f"[wrapped@init] val_loss={init_val['loss']:.6f}", flush=True)
     print("[wrapped@init] evaluating test split", flush=True)
-    init_test = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False)
+    init_test = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False, label="wrapped_init/test")
     print(f"[wrapped@init] test_loss={init_test['loss']:.6f}", flush=True)
 
     print()
@@ -1242,7 +1265,7 @@ def train(cfg: PEFTComparisonConfig) -> None:
         do_eval = epoch == 1 or epoch % cfg.eval_every == 0 or epoch == cfg.epochs
         if do_eval:
             print(f"[eval] epoch={epoch:03d} evaluating val split", flush=True)
-            val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
+            val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True, label=f"eval/epoch_{epoch:03d}/val")
             val_loss = val_metrics["loss"]
             val_imp = baseline_val - val_loss
 
@@ -1254,7 +1277,7 @@ def train(cfg: PEFTComparisonConfig) -> None:
             test_imp = None
             if cfg.eval_test_during_training:
                 print(f"[eval] epoch={epoch:03d} evaluating test split", flush=True)
-                test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False)
+                test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=False, label=f"eval/epoch_{epoch:03d}/test")
                 test_imp = baseline_test - test_metrics["loss"]
                 row["test_loss_exploratory"] = test_metrics["loss"]
                 row["test_improvement_exploratory"] = test_imp
@@ -1310,11 +1333,11 @@ def train(cfg: PEFTComparisonConfig) -> None:
     load_trainable_state_dict(wrapped, best_state["trainable_state_dict"])
 
     print("[best] evaluating train split", flush=True)
-    best_train_metrics = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False)
+    best_train_metrics = eval_wrapped(wrapped, train_chunks, cfg.batch_size, collect_stats=False, label="best/train")
     print("[best] evaluating val split", flush=True)
-    best_val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True)
+    best_val_metrics = eval_wrapped(wrapped, val_chunks, cfg.batch_size, collect_stats=True, label="best/val")
     print("[best] evaluating test split", flush=True)
-    best_test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=True)
+    best_test_metrics = eval_wrapped(wrapped, test_chunks, cfg.batch_size, collect_stats=True, label="best/test")
 
     train_imp = baseline_train - best_train_metrics["loss"]
     val_imp = baseline_val - best_val_metrics["loss"]
