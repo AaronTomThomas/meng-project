@@ -20,6 +20,13 @@ class LoadedTaskData:
     split_names: dict[str, str | None]
     split_details: dict[str, dict[str, object]]
 
+
+_RTE_LABELS = {"0", "1", "entailment", "not_entailment"}
+
+
+def _glue_tsv_reader(f) -> csv.DictReader:
+    return csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
+
 def _limit(ds: Dataset | None, limit: int | None) -> Dataset | None:
     if ds is None or limit is None:
         return ds
@@ -58,7 +65,7 @@ def _parse_optional_int(value: object) -> int | None:
 def _load_sst2_tsv(path: Path, *, has_labels: bool) -> Dataset:
     rows: list[dict[str, object]] = []
     with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
+        reader = _glue_tsv_reader(f)
         for row_idx, row in enumerate(reader):
             example: dict[str, object] = {"sentence": row["sentence"]}
             official_index = _parse_optional_int(row.get("index"))
@@ -80,10 +87,21 @@ def _parse_optional_label(value: object) -> str | None:
     return text
 
 
+def _parse_required_rte_label(path: Path, line_number: int, row: dict[str, object]) -> str:
+    label = _parse_optional_label(row.get("label"))
+    if label in _RTE_LABELS:
+        return label
+    index = row.get("index", row.get("idx"))
+    raise ValueError(
+        f"Invalid RTE label in {path} at line {line_number} "
+        f"(index={index!r}): label={row.get('label')!r}; row={row!r}"
+    )
+
+
 def _load_rte_tsv(path: Path, *, has_labels: bool) -> Dataset:
     rows: list[dict[str, object]] = []
     with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
+        reader = _glue_tsv_reader(f)
         for row_idx, row in enumerate(reader):
             example: dict[str, object] = {
                 "sentence1": row["sentence1"],
@@ -94,7 +112,7 @@ def _load_rte_tsv(path: Path, *, has_labels: bool) -> Dataset:
             if official_index is not None:
                 example["index"] = official_index
             if has_labels:
-                example["label"] = _parse_optional_label(row.get("label"))
+                example["label"] = _parse_required_rte_label(path, row_idx + 2, row)
             rows.append(example)
     return Dataset.from_list(rows)
 
