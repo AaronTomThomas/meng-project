@@ -47,6 +47,12 @@ COMMANDS = (
         help_text="GPT-2 LoReFT residual-stream intervention baseline.",
     ),
     CommandSpec(
+        name="gpt2-loreft-z",
+        family="gpt2",
+        method=AdapterMethod.LOREFT_Z,
+        help_text="GPT-2 LoReFT pre-c_proj z-space intervention baseline.",
+    ),
+    CommandSpec(
         name="pythia-akaza",
         family="pythia",
         method=AdapterMethod.AKAZA_FREEZ,
@@ -63,6 +69,12 @@ COMMANDS = (
         family="pythia",
         method=AdapterMethod.LOREFT,
         help_text="Pythia/GPT-NeoX LoReFT residual-stream intervention baseline.",
+    ),
+    CommandSpec(
+        name="pythia-loreft-z",
+        family="pythia",
+        method=AdapterMethod.LOREFT_Z,
+        help_text="Pythia/GPT-NeoX LoReFT pre-attention.dense z-space intervention baseline.",
     ),
 )
 

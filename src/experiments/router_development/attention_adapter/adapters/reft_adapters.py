@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-REFT_METHODS = {"loreft"}
+REFT_INTERVENTION_METHODS = {"loreft"}
 REFT_POSITION_MODES = {"all", "prefix", "suffix", "prefix_suffix"}
 
 def extract_hidden(output: Any) -> torch.Tensor:
@@ -51,8 +51,8 @@ class ReFTIntervention(nn.Module):
             raise ValueError("--reft_rank must be positive")
         if rank > hidden_size:
             raise ValueError(f"--reft_rank={rank} cannot exceed hidden_size={hidden_size}")
-        if method not in REFT_METHODS:
-            raise ValueError(f"Unknown ReFT method={method!r}; choices={sorted(REFT_METHODS)}")
+        if method not in REFT_INTERVENTION_METHODS:
+            raise ValueError(f"Unknown ReFT method={method!r}; choices={sorted(REFT_INTERVENTION_METHODS)}")
 
         self.method = method
         self.output_scale = float(output_scale)
@@ -132,9 +132,9 @@ class ResidualReFTAdapter(AdapterModel):
     def __init__(self, *, model: nn.Module, cfg: AdapterFineTuneConfig, layer_indices: Sequence[int]):
         super().__init__()
 
-        if cfg.method not in REFT_METHODS:
+        if str(cfg.method) != "loreft":
             raise ValueError(
-                f"ResidualReFTAdapter expected one of {sorted(REFT_METHODS)}, "
+                "ResidualReFTAdapter expected method='loreft', "
                 f"got {cfg.method!r}"
             )
 
@@ -223,6 +223,129 @@ class ResidualReFTAdapter(AdapterModel):
             for layer_idx in self.layer_indices:
                 layer = self.layers[layer_idx]
                 handles.append(layer.register_forward_hook(self._make_layer_hook(layer_idx)))
+
+            return self.model(input_ids=input_ids, use_cache=False).logits
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    @torch.no_grad()
+    def peft_stats(self, input_ids: torch.Tensor | None = None) -> Dict[str, float]:
+        if input_ids is None:
+            return {}
+
+        self.set_peft_eval_mode()
+        _ = self(input_ids)
+
+        return delta_stats(self._latest_deltas)
+
+
+class ZSpaceLoReFTAdapter(AdapterModel):
+    """
+    Pre-output-projection attention-output LoReFT adapter.
+
+    GPT-2:
+      hooks model.transformer.h[layer_idx].attn.c_proj and edits its input z.
+
+    Pythia/GPT-NeoX:
+      hooks model.gpt_neox.layers[layer_idx].attention.dense and edits its input z.
+    """
+
+    def __init__(self, *, model: nn.Module, cfg: AdapterFineTuneConfig, layer_indices: Sequence[int]):
+        super().__init__()
+
+        self.model = model
+        self.cfg = cfg
+        self.layer_indices = sorted(int(x) for x in layer_indices)
+        self._latest_deltas: Dict[int, torch.Tensor] = {}
+
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+        if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+            self.layers = model.transformer.h
+            hidden_size = int(model.config.n_embd)
+            self.arch_name = "gpt2"
+        elif hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers"):
+            self.layers = model.gpt_neox.layers
+            hidden_size = int(model.config.hidden_size)
+            self.arch_name = "pythia"
+        else:
+            raise ValueError(
+                "ZSpaceLoReFTAdapter only supports GPT-2-style "
+                "model.transformer.h or Pythia/GPT-NeoX-style model.gpt_neox.layers."
+            )
+
+        n_layers = len(self.layers)
+        for layer_idx in self.layer_indices:
+            if layer_idx < 0 or layer_idx >= n_layers:
+                raise ValueError(f"layer_idx={layer_idx} out of range for n_layers={n_layers}")
+
+        self.interventions = nn.ModuleDict(
+            {
+                str(layer_idx): ReFTIntervention(
+                    hidden_size=hidden_size,
+                    rank=cfg.reft_rank,
+                    method="loreft",
+                    dropout=getattr(cfg, "reft_dropout", 0.05),
+                    output_scale=getattr(cfg, "reft_output_scale", 1.0),
+                )
+                for layer_idx in self.layer_indices
+            }
+        )
+
+        for p in self.interventions.parameters():
+            p.requires_grad_(True)
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.interventions.parameters()).device
+
+    def set_peft_train_mode(self) -> None:
+        self.model.eval()
+        self.interventions.train()
+
+    def set_peft_eval_mode(self) -> None:
+        self.model.eval()
+        self.interventions.eval()
+
+    def _make_projection_pre_hook(self, layer_idx: int):
+        def hook(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+            z = inputs[0]
+            edited = self.interventions[str(layer_idx)](z)
+
+            mask = reft_position_mask(
+                seq_len=z.shape[1],
+                mode=getattr(self.cfg, "reft_position_mode", "all"),
+                prefix_positions=getattr(self.cfg, "reft_prefix_positions", 0),
+                suffix_positions=getattr(self.cfg, "reft_suffix_positions", 0),
+                device=z.device,
+            )
+
+            new_z = torch.where(mask, edited, z)
+            self._latest_deltas[layer_idx] = (new_z - z).detach()
+            return (new_z,) + inputs[1:]
+
+        return hook
+
+    def _projection_module(self, layer_idx: int) -> nn.Module:
+        layer = self.layers[layer_idx]
+        if self.arch_name == "gpt2":
+            return layer.attn.c_proj
+        if self.arch_name == "pythia":
+            return layer.attention.dense
+        raise RuntimeError(f"Unsupported arch_name={self.arch_name!r}")
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        input_ids = input_ids.to(self.device)
+        self._latest_deltas.clear()
+
+        handles: list[torch.utils.hooks.RemovableHandle] = []
+
+        try:
+            for layer_idx in self.layer_indices:
+                projection = self._projection_module(layer_idx)
+                handles.append(projection.register_forward_pre_hook(self._make_projection_pre_hook(layer_idx)))
 
             return self.model(input_ids=input_ids, use_cache=False).logits
         finally:

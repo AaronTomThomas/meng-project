@@ -15,11 +15,13 @@ class AdapterMethod(str, Enum):
     LORA = "lora"
 
     LOREFT = "loreft"
+    LOREFT_Z = "loreft_z"
     def __str__(self) -> str:
         return self.value
 
 REFT_METHODS: set[AdapterMethod] = {
     AdapterMethod.LOREFT,
+    AdapterMethod.LOREFT_Z,
 }
 
 @dataclass
@@ -104,6 +106,7 @@ CONFIG_TYPES: dict[AdapterMethod, type[BaseAdapterFineTuneConfig]] = {
     AdapterMethod.LORA: LoRAFineTuneConfig,
 
     AdapterMethod.LOREFT: ReFTFineTuneConfig,
+    AdapterMethod.LOREFT_Z: ReFTFineTuneConfig,
 }
 
 

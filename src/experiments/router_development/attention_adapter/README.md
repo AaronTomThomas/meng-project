@@ -13,12 +13,16 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-akaza --help
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-lora --help
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-loreft --help
+UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-loreft-z --help
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-akaza --help
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-lora --help
 UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-loreft --help
+UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-loreft-z --help
 ```
 
 LoReFT uses `pyreft.ReftConfig`, `pyreft.LoreftIntervention`, and `pyreft.get_reft_model` directly. `pyreft` is imported at runtime because the current upstream package metadata conflicts with this repo's locked dependency set; install it in a compatible environment before running `*-loreft` commands. The legacy `--reft_output_scale` flag is still accepted for config compatibility, but canonical PyReFT controls the intervention math.
+
+The `*-loreft-z` commands use the local LoReFT intervention module at the pre-output-projection attention output: GPT-2 `attn.c_proj` input and Pythia/GPT-NeoX `attention.dense` input.
 
 The training CLI limits dataset size by packed chunks: `--max_train_chunks`, `--max_val_chunks`, and `--max_test_chunks`. It does not expose `--max_*_texts` flags.
 
@@ -104,6 +108,25 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --output_path outputs/attention_adapter/gpt2_loreft_all_layers.pt
 ```
 
+### GPT-2 z-space LoReFT
+
+```bash
+UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli gpt2-loreft-z \
+  --device cuda \
+  --layer_indices 0,1,2,3,4,5,6,7,8,9,10,11 \
+  --block_size 96 \
+  --batch_size 4 \
+  --max_train_chunks 2048 \
+  --max_val_chunks 512 \
+  --max_test_chunks 512 \
+  --epochs 500 \
+  --patience 30 \
+  --reft_rank 4 \
+  --reft_dropout 0.05 \
+  --reft_position_mode all \
+  --output_path outputs/attention_adapter/gpt2_loreft_z_all_layers.pt
+```
+
 ## Pythia/GPT-NeoX Runs
 
 ### Pythia/GPT-NeoX AKAZA/FreeZ
@@ -163,6 +186,25 @@ UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_de
   --reft_dropout 0.05 \
   --reft_position_mode all \
   --output_path outputs/attention_adapter/pythia_loreft_all_layers.pt
+```
+
+### Pythia/GPT-NeoX z-space LoReFT
+
+```bash
+UV_CACHE_DIR=/tmp/uv_cache PYTHONPATH=src uv run python -m experiments.router_development.attention_adapter.cli pythia-loreft-z \
+  --device cuda \
+  --layer_indices 0,1,2,3,4,5,6,7,8,9,10,11 \
+  --block_size 96 \
+  --batch_size 1 \
+  --max_train_chunks 512 \
+  --max_val_chunks 128 \
+  --max_test_chunks 128 \
+  --epochs 80 \
+  --patience 30 \
+  --reft_rank 4 \
+  --reft_dropout 0.05 \
+  --reft_position_mode all \
+  --output_path outputs/attention_adapter/pythia_loreft_z_all_layers.pt
 ```
 
 ## Dataset Overrides
