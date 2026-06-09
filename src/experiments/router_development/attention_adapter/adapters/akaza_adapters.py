@@ -15,11 +15,22 @@ from experiments.router_development.attention_adapter.config import AdapterFineT
 class BottleneckDeltaAdapter(nn.Module):
     """AKAZA/FreeZ bottleneck delta adapter with exact no-op initialization."""
 
-    def __init__(self, hidden_size: int, bottleneck_dim: int, dropout: float, output_scale: float):
+    def __init__(
+        self,
+        hidden_size: int,
+        bottleneck_dim: int,
+        dropout: float,
+        output_scale: float,
+        *,
+        input_size: int | None = None,
+        output_size: int | None = None,
+    ):
         super().__init__()
+        input_size = hidden_size if input_size is None else input_size
+        output_size = hidden_size if output_size is None else output_size
         self.output_scale = float(output_scale)
-        self.down = nn.Linear(hidden_size, bottleneck_dim)
-        self.up = nn.Linear(bottleneck_dim, hidden_size)
+        self.down = nn.Linear(input_size, bottleneck_dim)
+        self.up = nn.Linear(bottleneck_dim, output_size)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         nn.init.normal_(self.down.weight, mean=0.0, std=0.02)
         nn.init.zeros_(self.down.bias)
@@ -48,10 +59,12 @@ class GPT2AKAZAAdapter(AdapterModel):
         for p in self.model.parameters():
             p.requires_grad_(False)
         hidden_size = int(model.config.n_embd)
+        adapter_input_size = 2 * hidden_size if str(cfg.method) == "akaza_fused" else hidden_size
         self.adapters = nn.ModuleDict(
             {
                 str(layer_idx): BottleneckDeltaAdapter(
                     hidden_size=hidden_size,
+                    input_size=adapter_input_size,
                     bottleneck_dim=cfg.bottleneck_dim,
                     dropout=cfg.adapter_dropout,
                     output_scale=cfg.output_scale,
@@ -76,13 +89,33 @@ class GPT2AKAZAAdapter(AdapterModel):
         self.model.eval()
         self.adapters.eval()
 
-    def adapter_input_for_block(self, *, block: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
-        # The adapter is conditioned on frozen pre-attention features x = LN1(h).
-        # Gradients update only the bottleneck delta map, not the base transformer path.
-        return block.ln_1(hidden_states).detach()
+    def adapter_input_for_block(
+        self,
+        *,
+        block: nn.Module,
+        hidden_states: torch.Tensor,
+        z_soft: torch.Tensor,
+    ) -> torch.Tensor:
+        method = str(self.cfg.method)
+        base_input = block.ln_1(hidden_states).detach()
+        z_input = z_soft.detach()
+        if method == "akaza_freez":
+            return base_input
+        if method == "akaza_zconditioned":
+            return z_input
+        if method == "akaza_fused":
+            return torch.cat([base_input, z_input], dim=-1)
+        raise ValueError(f"Unknown AKAZA method={self.cfg.method!r}")
 
-    def compute_delta(self, *, layer_idx: int, block: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
-        adapter_input = self.adapter_input_for_block(block=block, hidden_states=hidden_states)
+    def compute_delta(
+        self,
+        *,
+        layer_idx: int,
+        block: nn.Module,
+        hidden_states: torch.Tensor,
+        z_soft: torch.Tensor,
+    ) -> torch.Tensor:
+        adapter_input = self.adapter_input_for_block(block=block, hidden_states=hidden_states, z_soft=z_soft)
         return self.adapters[str(layer_idx)](adapter_input)
 
     def _make_block_pre_hook(self, layer_idx: int):
@@ -104,6 +137,7 @@ class GPT2AKAZAAdapter(AdapterModel):
                 layer_idx=layer_idx,
                 block=block,
                 hidden_states=self._adapter_inputs[layer_idx],
+                z_soft=z,
             ).to(dtype=z.dtype, device=z.device)
             self._latest_deltas[layer_idx] = delta.detach()
             # GPT-2 c_proj receives the merged pre-output-projection attention value z.
@@ -152,10 +186,12 @@ class PythiaAKAZAAdapter(AdapterModel):
         for p in self.model.parameters():
             p.requires_grad_(False)
         hidden_size = int(model.config.hidden_size)
+        adapter_input_size = 2 * hidden_size if str(cfg.method) == "akaza_fused" else hidden_size
         self.adapters = nn.ModuleDict(
             {
                 str(layer_idx): BottleneckDeltaAdapter(
                     hidden_size=hidden_size,
+                    input_size=adapter_input_size,
                     bottleneck_dim=cfg.bottleneck_dim,
                     dropout=cfg.adapter_dropout,
                     output_scale=cfg.output_scale,
@@ -192,11 +228,11 @@ class PythiaAKAZAAdapter(AdapterModel):
                 )
             z = inputs[0]
             layer = self.model.gpt_neox.layers[layer_idx]
-            adapter_input = self._adapter_input_for_layer(layer_idx=layer_idx, layer=layer)
+            adapter_input = self._adapter_input_for_layer(layer_idx=layer_idx, layer=layer, z_soft=z)
             delta = self.adapters[str(layer_idx)](adapter_input).to(z.dtype)
             self._latest_deltas[layer_idx] = delta.detach()
             # Pythia exposes the same pre-output-projection attention value as
-            # attention.dense input, so the hook implements z -> z + Delta(LN1(h)).
+            # attention.dense input, so the hook implements z -> z + Delta(conditioning).
             return (z + delta,) + inputs[1:]
 
         return hook
@@ -205,10 +241,24 @@ class PythiaAKAZAAdapter(AdapterModel):
     def _capture_layer_input(self, layer_idx: int, hidden_states: torch.Tensor) -> None:
         self._adapter_inputs[layer_idx] = hidden_states
 
-    def _adapter_input_for_layer(self, *, layer_idx: int, layer: nn.Module) -> torch.Tensor:
+    def _adapter_input_for_layer(
+        self,
+        *,
+        layer_idx: int,
+        layer: nn.Module,
+        z_soft: torch.Tensor,
+    ) -> torch.Tensor:
         hidden_states = self._adapter_inputs[layer_idx]
-        # Match the GPT-2 AKAZA conditioning: x = input_layernorm(h), detached.
-        return layer.input_layernorm(hidden_states).detach()
+        method = str(self.cfg.method)
+        base_input = layer.input_layernorm(hidden_states).detach()
+        z_input = z_soft.detach()
+        if method == "akaza_freez":
+            return base_input
+        if method == "akaza_zconditioned":
+            return z_input
+        if method == "akaza_fused":
+            return torch.cat([base_input, z_input], dim=-1)
+        raise ValueError(f"Unknown AKAZA method={self.cfg.method!r}")
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.to(self.device)
@@ -240,4 +290,3 @@ class PythiaAKAZAAdapter(AdapterModel):
         self.set_peft_eval_mode()
         _ = self(input_ids)
         return delta_stats(self._latest_deltas)
-

@@ -10,7 +10,7 @@ from experiments.router_development.attention_adapter.adapters.akaza_adapters im
     GPT2AKAZAAdapter,
     PythiaAKAZAAdapter,
 )
-from experiments.router_development.attention_adapter.config import AdapterFineTuneConfig, AdapterMethod
+from experiments.router_development.attention_adapter.config import AKAZA_METHODS, AdapterFineTuneConfig, AdapterMethod
 from experiments.router_development.attention_adapter.models import (
     DEFAULT_FAMILY_SPECS,
     ModelFamilyDefaults,
@@ -31,7 +31,7 @@ def build_wrapped_model(
     if not isinstance(cfg.method, AdapterMethod):
         choices = [method.value for method in METHODS]
         raise TypeError(f"cfg.method must be an AdapterMethod enum, got {cfg.method!r}; choices={choices}")
-    if cfg.method is AdapterMethod.AKAZA_FREEZ:
+    if cfg.method in AKAZA_METHODS:
         if cfg.model_family == "gpt2":
             return GPT2AKAZAAdapter(model=model, cfg=cfg, layer_indices=layer_indices)
         if cfg.model_family == "pythia":

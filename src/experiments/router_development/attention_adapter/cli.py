@@ -10,6 +10,7 @@ import torch
 
 
 from experiments.router_development.attention_adapter.config import (
+    AKAZA_METHODS,
     AdapterMethod,
     REFT_METHODS,
     config_from_args,
@@ -35,6 +36,18 @@ COMMANDS = (
         help_text="GPT-2 custom AKAZA/FreeZ pre-c_proj z-space adapter.",
     ),
     CommandSpec(
+        name="gpt2-akaza-zconditioned",
+        family="gpt2",
+        method=AdapterMethod.AKAZA_ZCONDITIONED,
+        help_text="GPT-2 AKAZA adapter conditioned on pre-c_proj z_soft.",
+    ),
+    CommandSpec(
+        name="gpt2-akaza-fused",
+        family="gpt2",
+        method=AdapterMethod.AKAZA_FUSED,
+        help_text="GPT-2 AKAZA adapter conditioned on concat(LN1(h), z_soft).",
+    ),
+    CommandSpec(
         name="gpt2-lora",
         family="gpt2",
         method=AdapterMethod.LORA,
@@ -57,6 +70,18 @@ COMMANDS = (
         family="pythia",
         method=AdapterMethod.AKAZA_FREEZ,
         help_text="Pythia/GPT-NeoX custom AKAZA/FreeZ pre-attention.dense adapter.",
+    ),
+    CommandSpec(
+        name="pythia-akaza-zconditioned",
+        family="pythia",
+        method=AdapterMethod.AKAZA_ZCONDITIONED,
+        help_text="Pythia/GPT-NeoX AKAZA adapter conditioned on pre-attention.dense z_soft.",
+    ),
+    CommandSpec(
+        name="pythia-akaza-fused",
+        family="pythia",
+        method=AdapterMethod.AKAZA_FUSED,
+        help_text="Pythia/GPT-NeoX AKAZA adapter conditioned on concat(LN1(h), z_soft).",
     ),
     CommandSpec(
         name="pythia-lora",
@@ -170,7 +195,7 @@ def add_method_args(
     method: AdapterMethod,
     defaults: ModelFamilyDefaults,
 ) -> None:
-    if method is AdapterMethod.AKAZA_FREEZ:
+    if method in AKAZA_METHODS:
         add_akaza_args(parser, defaults)
         return
     if method is AdapterMethod.LORA:

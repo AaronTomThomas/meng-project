@@ -6,7 +6,16 @@ from typing import Literal
 import torch
 
 
-MethodName = Literal["zero_shot", "full_finetune", "akaza_freez", "lora", "loreft", "reft"]
+MethodName = Literal[
+    "zero_shot",
+    "full_finetune",
+    "akaza_freez",
+    "akaza_zconditioned",
+    "akaza_fused",
+    "lora",
+    "loreft",
+    "reft",
+]
 TaskName = Literal["sst2", "rte"]
 
 

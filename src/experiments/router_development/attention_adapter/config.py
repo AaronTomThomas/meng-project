@@ -12,6 +12,8 @@ from experiments.attention_learners import LearnerHyperParams
 
 class AdapterMethod(str, Enum):
     AKAZA_FREEZ = "akaza_freez"
+    AKAZA_ZCONDITIONED = "akaza_zconditioned"
+    AKAZA_FUSED = "akaza_fused"
     LORA = "lora"
 
     LOREFT = "loreft"
@@ -22,6 +24,12 @@ class AdapterMethod(str, Enum):
 REFT_METHODS: set[AdapterMethod] = {
     AdapterMethod.LOREFT,
     AdapterMethod.LOREFT_Z,
+}
+
+AKAZA_METHODS: set[AdapterMethod] = {
+    AdapterMethod.AKAZA_FREEZ,
+    AdapterMethod.AKAZA_ZCONDITIONED,
+    AdapterMethod.AKAZA_FUSED,
 }
 
 @dataclass
@@ -103,6 +111,8 @@ AdapterFineTuneConfig: TypeAlias = (
 
 CONFIG_TYPES: dict[AdapterMethod, type[BaseAdapterFineTuneConfig]] = {
     AdapterMethod.AKAZA_FREEZ: AKAZAFreeZConfig,
+    AdapterMethod.AKAZA_ZCONDITIONED: AKAZAFreeZConfig,
+    AdapterMethod.AKAZA_FUSED: AKAZAFreeZConfig,
     AdapterMethod.LORA: LoRAFineTuneConfig,
 
     AdapterMethod.LOREFT: ReFTFineTuneConfig,
