@@ -1,0 +1,4 @@
+task,method,model_name_or_path,report_split,main_metric,n,mean,std,stderr,seeds,trainable_parameters
+sst2,akaza_freez,openai-community/gpt2,validation,accuracy,3,0.9181957186544342,0.005171157973420762,0.002985569447976557,"0,1,2",25355
+sst2,lora,openai-community/gpt2,validation,accuracy,3,0.9132262996941897,0.006316021269823549,0.0036465565803400282,"0,1,2",67584
+sst2,loreft,openai-community/gpt2,validation,accuracy,3,0.9109327217125381,0.006316021269823512,0.003646556580340007,"0,1,2",67628

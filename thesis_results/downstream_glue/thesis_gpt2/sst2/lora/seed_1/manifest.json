@@ -1,0 +1,210 @@
+{
+  "argv": [
+    "/vol/bitbucket/at2222/meng-project/src/experiments/router_development/attention_adapter/fine_tuning_evaluation/cli.py",
+    "--model_name_or_path",
+    "openai-community/gpt2",
+    "--task",
+    "sst2",
+    "--model_family",
+    "gpt2",
+    "--device",
+    "cuda",
+    "--do_train",
+    "--do_eval",
+    "--batch_size",
+    "4",
+    "--eval_batch_size",
+    "8",
+    "--gradient_accumulation_steps",
+    "1",
+    "--epochs",
+    "10",
+    "--patience",
+    "3",
+    "--eval_every",
+    "1",
+    "--weight_decay",
+    "0.0",
+    "--selection_split_from_train",
+    "0.0",
+    "--max_length",
+    "256",
+    "--target_max_length",
+    "4",
+    "--grad_clip",
+    "1.0",
+    "--method",
+    "lora",
+    "--output_dir",
+    "outputs/downstream/thesis_gpt2/sst2/lora/seed_1",
+    "--seed",
+    "1",
+    "--lr",
+    "3e-4",
+    "--layer_indices",
+    "1,2,3,4,5,6,7,8,9,10,11",
+    "--peft_target_profile",
+    "attn_c_proj",
+    "--lora_rank",
+    "4",
+    "--lora_alpha",
+    "4",
+    "--lora_dropout",
+    "0.05",
+    "--lora_bias",
+    "none"
+  ],
+  "config": {
+    "adapter_dropout": 0.05,
+    "batch_size": 4,
+    "bottleneck_dim": null,
+    "checkpoint_path": null,
+    "device": "cuda",
+    "do_eval": true,
+    "do_train": true,
+    "epochs": 10,
+    "eval_batch_size": 8,
+    "eval_every": 1,
+    "glue_data_dir": "glue_data",
+    "grad_clip": 1.0,
+    "gradient_accumulation_steps": 1,
+    "layer_indices": "1,2,3,4,5,6,7,8,9,10,11",
+    "lora_alpha": 4,
+    "lora_bias": "none",
+    "lora_dropout": 0.05,
+    "lora_rank": 4,
+    "lr": 0.0003,
+    "max_length": 256,
+    "max_test_examples": null,
+    "max_train_examples": null,
+    "max_val_examples": null,
+    "method": "lora",
+    "model_family": "gpt2",
+    "model_name_or_path": "openai-community/gpt2",
+    "output_dir": "outputs/downstream/thesis_gpt2/sst2/lora/seed_1",
+    "output_scale": null,
+    "patience": 3,
+    "peft_target_profile": "attn_c_proj",
+    "reft_dropout": 0.05,
+    "reft_output_scale": 1.0,
+    "reft_position_mode": "all",
+    "reft_prefix_positions": 0,
+    "reft_rank": 4,
+    "reft_suffix_positions": 0,
+    "seed": 1,
+    "selection_split_from_train": 0.0,
+    "selection_split_seed": null,
+    "target_max_length": 4,
+    "task": "sst2",
+    "weight_decay": 0.0
+  },
+  "git": {
+    "branch": "master",
+    "commit": "ce2d803939332cb69c7e79fa2e9eb7e791b49394",
+    "is_dirty": true,
+    "status_short": "M pyproject.toml\n M uv.lock\n?? glue_data/\n?? outputs/downstream/"
+  },
+  "model": {
+    "layer_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "method": "lora",
+    "model_family": "gpt2",
+    "model_name_or_path": "openai-community/gpt2",
+    "parameter_counts": {
+      "total_parameters": 124507392,
+      "trainable_parameters": 67584
+    }
+  },
+  "packages": {
+    "datasets": "4.8.4",
+    "peft": "0.19.1",
+    "torch": "2.9.1+cu128",
+    "transformers": "5.5.0"
+  },
+  "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+  "python": "3.13.1 (main, Jan 14 2025, 22:47:38) [Clang 19.1.6 ]",
+  "splits": {
+    "selection": {
+      "has_labels": true,
+      "is_train_derived": false,
+      "num_examples": 872,
+      "selection_fraction_from_train": 0.0,
+      "source_split": "dev.tsv"
+    },
+    "test": {
+      "has_labels": false,
+      "num_examples": 1821,
+      "source_kind": "official",
+      "source_split": "test.tsv"
+    },
+    "train": {
+      "has_labels": true,
+      "num_examples": 67349,
+      "source_split": "train.tsv"
+    },
+    "validation": {
+      "has_labels": true,
+      "num_examples": 872,
+      "source_split": "dev.tsv"
+    }
+  },
+  "task": {
+    "candidate_score_normalization": "mean_token_logprob",
+    "candidate_tokenizations": {
+      "negative": [
+        4633
+      ],
+      "positive": [
+        3967
+      ]
+    },
+    "candidate_verbalizers": {
+      "negative": " negative",
+      "positive": " positive"
+    },
+    "dataset_name": "glue",
+    "evaluation_protocol": "decoder_lm_verbalized_classification",
+    "glue_dir_name": "SST-2",
+    "main_metric": "accuracy",
+    "name": "sst2",
+    "prompt_template": "Sentence: {sentence}\\nSentiment:",
+    "selection_metric": "accuracy",
+    "selection_mode": "max",
+    "target_eos": false,
+    "test_file": "test.tsv",
+    "train_file": "train.tsv",
+    "validation_file": "dev.tsv"
+  },
+  "tokenizer": {
+    "eos_token": "<|endoftext|>",
+    "eos_token_id": 50256,
+    "pad_token": "<|endoftext|>",
+    "pad_token_id": 50256
+  },
+  "training": {
+    "batch_size": 4,
+    "device": "cuda",
+    "effective_batch_size": 4,
+    "epochs": 10,
+    "eval_batch_size": 8,
+    "gradient_accumulation_steps": 1,
+    "lr": 0.0003,
+    "max_length": 256,
+    "seed": 1,
+    "selection_split_from_train": 0.0,
+    "selection_split_seed": 1,
+    "target_max_length": 4,
+    "weight_decay": 0.0
+  }
+}
