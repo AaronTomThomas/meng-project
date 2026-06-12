@@ -1,0 +1,274 @@
+{
+  "best_epoch": 9,
+  "best_selection_score": 0.6606498194945848,
+  "best_validation_loss": 0.23621107725536122,
+  "layer_indices": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "manifest": {
+    "argv": [
+      "/vol/bitbucket/at2222/meng-project/src/experiments/router_development/attention_adapter/fine_tuning_evaluation/cli.py",
+      "--model_name_or_path",
+      "openai-community/gpt2",
+      "--task",
+      "rte",
+      "--model_family",
+      "gpt2",
+      "--device",
+      "cuda",
+      "--do_train",
+      "--do_eval",
+      "--batch_size",
+      "4",
+      "--eval_batch_size",
+      "8",
+      "--gradient_accumulation_steps",
+      "1",
+      "--epochs",
+      "10",
+      "--patience",
+      "3",
+      "--eval_every",
+      "1",
+      "--weight_decay",
+      "0.0",
+      "--selection_split_from_train",
+      "0.0",
+      "--max_length",
+      "256",
+      "--target_max_length",
+      "4",
+      "--grad_clip",
+      "1.0",
+      "--method",
+      "akaza_freez",
+      "--output_dir",
+      "outputs/downstream/thesis_gpt2/rte/akaza_freez/seed_1",
+      "--seed",
+      "1",
+      "--lr",
+      "3e-4",
+      "--layer_indices",
+      "1,2,3,4,5,6,7,8,9,10,11",
+      "--bottleneck_dim",
+      "4",
+      "--adapter_dropout",
+      "0.05",
+      "--output_scale",
+      "1.0"
+    ],
+    "config": {
+      "adapter_dropout": 0.05,
+      "batch_size": 4,
+      "bottleneck_dim": 4,
+      "checkpoint_path": null,
+      "device": "cuda",
+      "do_eval": true,
+      "do_train": true,
+      "epochs": 10,
+      "eval_batch_size": 8,
+      "eval_every": 1,
+      "glue_data_dir": "glue_data",
+      "grad_clip": 1.0,
+      "gradient_accumulation_steps": 1,
+      "layer_indices": "1,2,3,4,5,6,7,8,9,10,11",
+      "lora_alpha": 4,
+      "lora_bias": "none",
+      "lora_dropout": 0.05,
+      "lora_rank": 4,
+      "lr": 0.0003,
+      "max_length": 256,
+      "max_test_examples": null,
+      "max_train_examples": null,
+      "max_val_examples": null,
+      "method": "akaza_freez",
+      "model_family": "gpt2",
+      "model_name_or_path": "openai-community/gpt2",
+      "output_dir": "outputs/downstream/thesis_gpt2/rte/akaza_freez/seed_1",
+      "output_scale": 1.0,
+      "patience": 3,
+      "peft_target_profile": null,
+      "reft_dropout": 0.05,
+      "reft_output_scale": 1.0,
+      "reft_position_mode": "all",
+      "reft_prefix_positions": 0,
+      "reft_rank": 4,
+      "reft_suffix_positions": 0,
+      "seed": 1,
+      "selection_split_from_train": 0.0,
+      "selection_split_seed": null,
+      "target_max_length": 4,
+      "task": "rte",
+      "weight_decay": 0.0
+    },
+    "git": {
+      "branch": "master",
+      "commit": "255c242fc874bc46f6a490f4e1f2c2518044d77e",
+      "is_dirty": true,
+      "status_short": "?? experiment_machine_specs/\n?? glue_data/RTE/\n?? logs/\n?? outputs/attention_adapter/\n?? outputs/downstream/\n?? outputs/head_counterfactual_results/gpt2_counterfactual_summary.csv\n?? outputs/head_counterfactual_results/thesis_wt2/\n?? run_algorithmic_decomp_seeds12_reduced_no_local.sh\n?? run_lora_qkv_robustness.bash\n?? run_missing_peft_3seeds.bash\n?? run_peft_cleanup_refresh.bash\n?? run_ttr_bridge_and_closeness_seeds12.sh\n?? scripts/\n?? transformers_importtime.log"
+    },
+    "model": {
+      "layer_indices": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "method": "akaza_freez",
+      "model_family": "gpt2",
+      "model_name_or_path": "openai-community/gpt2",
+      "parameter_counts": {
+        "total_parameters": 124515884,
+        "trainable_parameters": 76076
+      }
+    },
+    "packages": {
+      "datasets": "4.8.4",
+      "peft": "0.19.1",
+      "torch": "2.9.1+cu128",
+      "transformers": "5.5.0"
+    },
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.13.1 (main, Jan 14 2025, 22:47:38) [Clang 19.1.6 ]",
+    "splits": {
+      "selection": {
+        "has_labels": true,
+        "is_train_derived": false,
+        "num_examples": 277,
+        "selection_fraction_from_train": 0.0,
+        "source_split": "dev.tsv"
+      },
+      "test": {
+        "has_labels": false,
+        "num_examples": 3000,
+        "source_kind": "official",
+        "source_split": "test.tsv"
+      },
+      "train": {
+        "has_labels": true,
+        "num_examples": 2490,
+        "source_split": "train.tsv"
+      },
+      "validation": {
+        "has_labels": true,
+        "num_examples": 277,
+        "source_split": "dev.tsv"
+      }
+    },
+    "task": {
+      "candidate_score_normalization": "mean_token_logprob",
+      "candidate_tokenizations": {
+        "entailment": [
+          39793,
+          434
+        ],
+        "not_entailment": [
+          407,
+          62,
+          298,
+          603,
+          434
+        ]
+      },
+      "candidate_verbalizers": {
+        "entailment": " entailment",
+        "not_entailment": " not_entailment"
+      },
+      "dataset_name": "glue",
+      "evaluation_protocol": "decoder_lm_verbalized_classification",
+      "glue_dir_name": "RTE",
+      "main_metric": "accuracy",
+      "name": "rte",
+      "prompt_template": "Premise: {sentence1}\\nHypothesis: {sentence2}\\nEntailment:",
+      "selection_metric": "accuracy",
+      "selection_mode": "max",
+      "target_eos": false,
+      "test_file": "test.tsv",
+      "train_file": "train.tsv",
+      "validation_file": "dev.tsv"
+    },
+    "tokenizer": {
+      "eos_token": "<|endoftext|>",
+      "eos_token_id": 50256,
+      "pad_token": "<|endoftext|>",
+      "pad_token_id": 50256
+    },
+    "training": {
+      "batch_size": 4,
+      "device": "cuda",
+      "effective_batch_size": 4,
+      "epochs": 10,
+      "eval_batch_size": 8,
+      "gradient_accumulation_steps": 1,
+      "lr": 0.0003,
+      "max_length": 256,
+      "seed": 1,
+      "selection_split_from_train": 0.0,
+      "selection_split_seed": 1,
+      "target_max_length": 4,
+      "weight_decay": 0.0
+    }
+  },
+  "method": "akaza_freez",
+  "model_family": "gpt2",
+  "selection_metric": "accuracy",
+  "selection_mode": "max",
+  "split_details": {
+    "selection": {
+      "has_labels": true,
+      "is_train_derived": false,
+      "num_examples": 277,
+      "selection_fraction_from_train": 0.0,
+      "source_split": "dev.tsv"
+    },
+    "test": {
+      "has_labels": false,
+      "num_examples": 3000,
+      "source_kind": "official",
+      "source_split": "test.tsv"
+    },
+    "train": {
+      "has_labels": true,
+      "num_examples": 2490,
+      "source_split": "train.tsv"
+    },
+    "validation": {
+      "has_labels": true,
+      "num_examples": 277,
+      "source_split": "dev.tsv"
+    }
+  },
+  "split_names": {
+    "selection": "dev.tsv",
+    "test": "test.tsv",
+    "train": "train.tsv",
+    "val": "dev.tsv"
+  },
+  "task": "rte",
+  "test_examples": 3000.0,
+  "test_predicted_examples": 3000.0,
+  "total_parameters": 124515884,
+  "trainable_parameters": 76076,
+  "validation_accuracy": 0.6606498194945848,
+  "validation_examples": 277.0,
+  "validation_loss": 0.23621107725536122,
+  "validation_nll": 0.23621107725536122,
+  "validation_ppl": 1.2664415989733802
+}

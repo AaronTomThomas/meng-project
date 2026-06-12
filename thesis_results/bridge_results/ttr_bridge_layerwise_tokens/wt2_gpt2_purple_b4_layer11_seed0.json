@@ -1,0 +1,222 @@
+{
+  "checkpoint_path": "outputs/attention_adapter/single_layer_purple/wt2_gpt2_purple_b4_layer11_seed0.pt",
+  "source_summary_best_epoch": 38,
+  "source_summary_best_val_loss": 3.697750046849251,
+  "source_summary_best_test_loss": 3.8857382144778967,
+  "config": {
+    "local_kernel_beta": 1.0,
+    "window_size": 16,
+    "k_knn_mean": 4,
+    "ridge_lambda": 0.1,
+    "k_linear_local": 16,
+    "k_sharp": 2,
+    "model_family": "gpt2",
+    "model_name": "openai-community/gpt2",
+    "dataset_name": "wikitext",
+    "dataset_config": "wikitext-2-raw-v1",
+    "dataset_revision": null,
+    "text_field": "text",
+    "train_split": "train",
+    "val_split": "validation",
+    "test_split": "test",
+    "block_size": 96,
+    "batch_size": 4,
+    "max_train_chunks": 2048,
+    "max_val_chunks": 512,
+    "max_test_chunks": 512,
+    "layer_indices": "11",
+    "method": "akaza_freez",
+    "peft_l2": 1e-05,
+    "peft_l1": 0.0,
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "epochs": 500,
+    "patience": 3,
+    "eval_every": 1,
+    "grad_clip": 1.0,
+    "seed": 0,
+    "device": "cuda",
+    "output_path": "outputs/attention_adapter/single_layer_purple/wt2_gpt2_purple_b4_layer11_seed0.pt",
+    "cache_dir": "outputs/attention_adapter/cache_gpt2/",
+    "skip_freeze_check": false,
+    "eval_test_during_training": false,
+    "split": "train",
+    "max_chunks": 2048,
+    "bottleneck_dim": 4,
+    "adapter_dropout": 0.05,
+    "output_scale": 1.0
+  },
+  "eval_split": "val",
+  "dataset_split": "validation",
+  "n_chunks": 512,
+  "block_size": 96,
+  "layer_indices": [
+    11
+  ],
+  "candidate_learners": [
+    "sharp",
+    "linear_global",
+    "window_soft",
+    "knn_mean",
+    "linear_attention",
+    "weighted_linear",
+    "local_linear_attention"
+  ],
+  "canonical_learner_hparams": {
+    "local_kernel_beta": 1.0,
+    "window_size": 16,
+    "k_knn_mean": 4,
+    "ridge_lambda": 0.1,
+    "k_linear_local": 16,
+    "k_sharp": 2
+  },
+  "bridge_definition": {
+    "G_TTR": "max_a(base_token_nll - token_nll_after_replacing_layer_z_with_candidate_readout_a)",
+    "G_PURPLE_LAYER": "base_token_nll - token_nll_after_replacing_layer_z_with z_soft + trained_delta_for_that_same_layer",
+    "G_FULL_MODEL_PURPLE": "base_token_nll - token_nll_after_full_trained_PURPLE_forward",
+    "main_metric": "corr_G_TTR_G_PURPLE_LAYER"
+  },
+  "global": {
+    "n_token_layer": 48640,
+    "mean_G_TTR": 0.4326983690261841,
+    "mean_G_PURPLE_LAYER": 0.6330375075340271,
+    "mean_G_FULL_MODEL_PURPLE": 0.6330375075340271,
+    "mean_projection_gain": 0.016813060268759727,
+    "mean_full_layer_gain": 0.6330375075340271,
+    "mean_delta_norm": 15.59317684173584,
+    "mean_delta_WO_norm": 112.83856964111328,
+    "corr_G_TTR_delta_norm": 0.0795239825647493,
+    "corr_G_TTR_delta_WO_norm": 0.056897201601145246,
+    "corr_G_TTR_G_PURPLE_LAYER": 0.14253694417367901,
+    "corr_G_TTR_G_FULL_MODEL_PURPLE": 0.14253696230293827,
+    "corr_G_TTR_projection_gain": 0.1732226577006035,
+    "top_decile_delta_norm_enrichment": {
+      "threshold": 1.058488368988037,
+      "top_mean": 17.474620819091797,
+      "rest_mean": 15.38412857055664,
+      "ratio": 1.135886311531067,
+      "difference": 2.0904922485351562,
+      "top_count": 4864.0,
+      "rest_count": 43776.0
+    },
+    "top_decile_delta_WO_norm_enrichment": {
+      "threshold": 1.058488368988037,
+      "top_mean": 128.01016235351562,
+      "rest_mean": 111.15282440185547,
+      "ratio": 1.1516591310501099,
+      "difference": 16.857337951660156,
+      "top_count": 4864.0,
+      "rest_count": 43776.0
+    },
+    "top_decile_G_PURPLE_LAYER_enrichment": {
+      "threshold": 1.058488368988037,
+      "top_mean": 2.5830931663513184,
+      "rest_mean": 0.4163646697998047,
+      "ratio": 6.203920364379883,
+      "difference": 2.1667284965515137,
+      "top_count": 4864.0,
+      "rest_count": 43776.0
+    },
+    "top_decile_projection_gain_enrichment": {
+      "threshold": 1.058488368988037,
+      "top_mean": 0.06498418003320694,
+      "rest_mean": 0.011460713110864162,
+      "ratio": 5.670168876647949,
+      "difference": 0.0535234659910202,
+      "top_count": 4864.0,
+      "rest_count": 43776.0
+    },
+    "top_decile_G_FULL_MODEL_PURPLE_enrichment": {
+      "threshold": 1.058488368988037,
+      "top_mean": 2.5830931663513184,
+      "rest_mean": 0.4163646697998047,
+      "ratio": 6.203920364379883,
+      "difference": 2.1667284965515137,
+      "top_count": 4864.0,
+      "rest_count": 43776.0
+    },
+    "projection_recovery": {
+      "projection_energy_over_delta_energy": 0.01501968134023187,
+      "projection_gain_over_full_layer_gain": 0.026559343177652874,
+      "mean_projection_gain": 0.016813060268759727,
+      "mean_full_layer_gain": 0.6330375075340271
+    }
+  },
+  "layers": {
+    "11": {
+      "n_token_layer": 48640,
+      "mean_G_TTR": 0.4326983690261841,
+      "mean_G_PURPLE_LAYER": 0.6330375075340271,
+      "mean_G_FULL_MODEL_PURPLE": 0.6330375075340271,
+      "mean_projection_gain": 0.016813060268759727,
+      "mean_full_layer_gain": 0.6330375075340271,
+      "mean_delta_norm": 15.59317684173584,
+      "mean_delta_WO_norm": 112.83856964111328,
+      "corr_G_TTR_delta_norm": 0.0795239825647493,
+      "corr_G_TTR_delta_WO_norm": 0.056897201601145246,
+      "corr_G_TTR_G_PURPLE_LAYER": 0.14253694417367901,
+      "corr_G_TTR_G_FULL_MODEL_PURPLE": 0.14253696230293827,
+      "corr_G_TTR_projection_gain": 0.1732226577006035,
+      "top_decile_delta_norm_enrichment": {
+        "threshold": 1.058488368988037,
+        "top_mean": 17.474620819091797,
+        "rest_mean": 15.38412857055664,
+        "ratio": 1.135886311531067,
+        "difference": 2.0904922485351562,
+        "top_count": 4864.0,
+        "rest_count": 43776.0
+      },
+      "top_decile_delta_WO_norm_enrichment": {
+        "threshold": 1.058488368988037,
+        "top_mean": 128.01016235351562,
+        "rest_mean": 111.15282440185547,
+        "ratio": 1.1516591310501099,
+        "difference": 16.857337951660156,
+        "top_count": 4864.0,
+        "rest_count": 43776.0
+      },
+      "top_decile_G_PURPLE_LAYER_enrichment": {
+        "threshold": 1.058488368988037,
+        "top_mean": 2.5830931663513184,
+        "rest_mean": 0.4163646697998047,
+        "ratio": 6.203920364379883,
+        "difference": 2.1667284965515137,
+        "top_count": 4864.0,
+        "rest_count": 43776.0
+      },
+      "top_decile_projection_gain_enrichment": {
+        "threshold": 1.058488368988037,
+        "top_mean": 0.06498418003320694,
+        "rest_mean": 0.011460713110864162,
+        "ratio": 5.670168876647949,
+        "difference": 0.0535234659910202,
+        "top_count": 4864.0,
+        "rest_count": 43776.0
+      },
+      "top_decile_G_FULL_MODEL_PURPLE_enrichment": {
+        "threshold": 1.058488368988037,
+        "top_mean": 2.5830931663513184,
+        "rest_mean": 0.4163646697998047,
+        "ratio": 6.203920364379883,
+        "difference": 2.1667284965515137,
+        "top_count": 4864.0,
+        "rest_count": 43776.0
+      },
+      "best_learner_counts": {
+        "sharp": 9135,
+        "linear_global": 7736,
+        "window_soft": 4841,
+        "knn_mean": 6020,
+        "linear_attention": 8464,
+        "weighted_linear": 5696,
+        "local_linear_attention": 6748
+      },
+      "projection_recovery": {
+        "projection_energy_over_delta_energy": 0.01501968134023187,
+        "projection_gain_over_full_layer_gain": 0.026559343177652874,
+        "mean_projection_gain": 0.016813060268759727,
+        "mean_full_layer_gain": 0.6330375075340271
+      }
+    }
+  }
+}

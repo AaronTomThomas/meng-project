@@ -1,0 +1,220 @@
+{
+  "checkpoint_path": "outputs/attention_adapter/single_layer_purple/wt2_gpt2_purple_b4_layer6_seed0.pt",
+  "source_summary_best_epoch": 32,
+  "source_summary_best_val_loss": 3.596956955268979,
+  "source_summary_best_test_loss": 3.7878182511776686,
+  "config": {
+    "local_kernel_beta": 1.0,
+    "window_size": 16,
+    "k_knn_mean": 4,
+    "ridge_lambda": 0.1,
+    "k_linear_local": 16,
+    "k_sharp": 2,
+    "model_family": "gpt2",
+    "model_name": "openai-community/gpt2",
+    "dataset_name": "wikitext",
+    "dataset_config": "wikitext-2-raw-v1",
+    "dataset_revision": null,
+    "text_field": "text",
+    "train_split": "train",
+    "val_split": "validation",
+    "test_split": "test",
+    "block_size": 96,
+    "batch_size": 4,
+    "max_train_chunks": 2048,
+    "max_val_chunks": 256,
+    "max_test_chunks": 512,
+    "layer_indices": "6",
+    "method": "akaza_freez",
+    "peft_l2": 1e-05,
+    "peft_l1": 0.0,
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "epochs": 500,
+    "patience": 3,
+    "eval_every": 1,
+    "grad_clip": 1.0,
+    "seed": 0,
+    "device": "cuda",
+    "output_path": "outputs/attention_adapter/single_layer_purple/wt2_gpt2_purple_b4_layer6_seed0.pt",
+    "cache_dir": "outputs/attention_adapter/cache_gpt2/",
+    "skip_freeze_check": false,
+    "eval_test_during_training": false,
+    "split": "train",
+    "max_chunks": 2048,
+    "bottleneck_dim": 4,
+    "adapter_dropout": 0.05,
+    "output_scale": 1.0
+  },
+  "eval_split": "val",
+  "dataset_split": "validation",
+  "n_chunks": 256,
+  "block_size": 96,
+  "layer_indices": [
+    6
+  ],
+  "candidate_learners": [
+    "sharp",
+    "linear_global",
+    "window_soft",
+    "knn_mean",
+    "linear_attention",
+    "weighted_linear"
+  ],
+  "canonical_learner_hparams": {
+    "local_kernel_beta": 1.0,
+    "window_size": 16,
+    "k_knn_mean": 4,
+    "ridge_lambda": 0.1,
+    "k_linear_local": 16,
+    "k_sharp": 2
+  },
+  "bridge_definition": {
+    "G_TTR": "max_a(base_token_nll - token_nll_after_replacing_layer_z_with_candidate_readout_a)",
+    "G_PURPLE_LAYER": "base_token_nll - token_nll_after_replacing_layer_z_with z_soft + trained_delta_for_that_same_layer",
+    "G_FULL_MODEL_PURPLE": "base_token_nll - token_nll_after_full_trained_PURPLE_forward",
+    "main_metric": "corr_G_TTR_G_PURPLE_LAYER"
+  },
+  "global": {
+    "n_token_layer": 24320,
+    "mean_G_TTR": 0.42581906914711,
+    "mean_G_PURPLE_LAYER": 0.721568763256073,
+    "mean_G_FULL_MODEL_PURPLE": 0.721568763256073,
+    "mean_projection_gain": 0.013535702601075172,
+    "mean_full_layer_gain": 0.721568763256073,
+    "mean_delta_norm": 8.99714469909668,
+    "mean_delta_WO_norm": 29.479896545410156,
+    "corr_G_TTR_delta_norm": 0.09350651626483387,
+    "corr_G_TTR_delta_WO_norm": 0.09150419487461814,
+    "corr_G_TTR_G_PURPLE_LAYER": 0.21829205019846157,
+    "corr_G_TTR_G_FULL_MODEL_PURPLE": 0.21829174844525187,
+    "corr_G_TTR_projection_gain": 0.1625553880511085,
+    "top_decile_delta_norm_enrichment": {
+      "threshold": 1.0917075872421265,
+      "top_mean": 10.957341194152832,
+      "rest_mean": 8.779345512390137,
+      "ratio": 1.2480818033218384,
+      "difference": 2.1779956817626953,
+      "top_count": 2432.0,
+      "rest_count": 21888.0
+    },
+    "top_decile_delta_WO_norm_enrichment": {
+      "threshold": 1.0917075872421265,
+      "top_mean": 36.911556243896484,
+      "rest_mean": 28.65415382385254,
+      "ratio": 1.2881747484207153,
+      "difference": 8.257402420043945,
+      "top_count": 2432.0,
+      "rest_count": 21888.0
+    },
+    "top_decile_G_PURPLE_LAYER_enrichment": {
+      "threshold": 1.0917075872421265,
+      "top_mean": 2.386387825012207,
+      "rest_mean": 0.5365889072418213,
+      "ratio": 4.447329998016357,
+      "difference": 1.8497989177703857,
+      "top_count": 2432.0,
+      "rest_count": 21888.0
+    },
+    "top_decile_projection_gain_enrichment": {
+      "threshold": 1.0917075872421265,
+      "top_mean": 0.0654035210609436,
+      "rest_mean": 0.007772611454129219,
+      "ratio": 8.414613723754883,
+      "difference": 0.057630911469459534,
+      "top_count": 2432.0,
+      "rest_count": 21888.0
+    },
+    "top_decile_G_FULL_MODEL_PURPLE_enrichment": {
+      "threshold": 1.0917075872421265,
+      "top_mean": 2.386387825012207,
+      "rest_mean": 0.5365887880325317,
+      "ratio": 4.447330951690674,
+      "difference": 1.8497990369796753,
+      "top_count": 2432.0,
+      "rest_count": 21888.0
+    },
+    "projection_recovery": {
+      "projection_energy_over_delta_energy": 0.009029396602115153,
+      "projection_gain_over_full_layer_gain": 0.01875871466096463,
+      "mean_projection_gain": 0.013535702601075172,
+      "mean_full_layer_gain": 0.721568763256073
+    }
+  },
+  "layers": {
+    "6": {
+      "n_token_layer": 24320,
+      "mean_G_TTR": 0.42581906914711,
+      "mean_G_PURPLE_LAYER": 0.721568763256073,
+      "mean_G_FULL_MODEL_PURPLE": 0.721568763256073,
+      "mean_projection_gain": 0.013535702601075172,
+      "mean_full_layer_gain": 0.721568763256073,
+      "mean_delta_norm": 8.99714469909668,
+      "mean_delta_WO_norm": 29.479896545410156,
+      "corr_G_TTR_delta_norm": 0.09350651626483387,
+      "corr_G_TTR_delta_WO_norm": 0.09150419487461814,
+      "corr_G_TTR_G_PURPLE_LAYER": 0.21829205019846157,
+      "corr_G_TTR_G_FULL_MODEL_PURPLE": 0.21829174844525187,
+      "corr_G_TTR_projection_gain": 0.1625553880511085,
+      "top_decile_delta_norm_enrichment": {
+        "threshold": 1.0917075872421265,
+        "top_mean": 10.957341194152832,
+        "rest_mean": 8.779345512390137,
+        "ratio": 1.2480818033218384,
+        "difference": 2.1779956817626953,
+        "top_count": 2432.0,
+        "rest_count": 21888.0
+      },
+      "top_decile_delta_WO_norm_enrichment": {
+        "threshold": 1.0917075872421265,
+        "top_mean": 36.911556243896484,
+        "rest_mean": 28.65415382385254,
+        "ratio": 1.2881747484207153,
+        "difference": 8.257402420043945,
+        "top_count": 2432.0,
+        "rest_count": 21888.0
+      },
+      "top_decile_G_PURPLE_LAYER_enrichment": {
+        "threshold": 1.0917075872421265,
+        "top_mean": 2.386387825012207,
+        "rest_mean": 0.5365889072418213,
+        "ratio": 4.447329998016357,
+        "difference": 1.8497989177703857,
+        "top_count": 2432.0,
+        "rest_count": 21888.0
+      },
+      "top_decile_projection_gain_enrichment": {
+        "threshold": 1.0917075872421265,
+        "top_mean": 0.0654035210609436,
+        "rest_mean": 0.007772611454129219,
+        "ratio": 8.414613723754883,
+        "difference": 0.057630911469459534,
+        "top_count": 2432.0,
+        "rest_count": 21888.0
+      },
+      "top_decile_G_FULL_MODEL_PURPLE_enrichment": {
+        "threshold": 1.0917075872421265,
+        "top_mean": 2.386387825012207,
+        "rest_mean": 0.5365887880325317,
+        "ratio": 4.447330951690674,
+        "difference": 1.8497990369796753,
+        "top_count": 2432.0,
+        "rest_count": 21888.0
+      },
+      "best_learner_counts": {
+        "sharp": 6191,
+        "linear_global": 2564,
+        "window_soft": 3453,
+        "knn_mean": 3487,
+        "linear_attention": 4384,
+        "weighted_linear": 4241
+      },
+      "projection_recovery": {
+        "projection_energy_over_delta_energy": 0.009029396602115153,
+        "projection_gain_over_full_layer_gain": 0.01875871466096463,
+        "mean_projection_gain": 0.013535702601075172,
+        "mean_full_layer_gain": 0.721568763256073
+      }
+    }
+  }
+}

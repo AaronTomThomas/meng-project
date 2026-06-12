@@ -1,0 +1,39 @@
+GPT-2 & WikiText-2 & ARC \(b=1\) & 25{,}355 & 3 & \(3\mathrm{e}{-4}\) & \(0.795906 \pm 0.000630\) & \(0.803431 \pm 0.000263\) \\
+GPT-2 & WikiText-2 & ARC \(b=4\) & 76{,}076 & 3 & \(3\mathrm{e}{-4}\) & \(\mathbf{0.824523 \pm 0.001109}\) & \(\mathbf{0.832371 \pm 0.001133}\) \\
+GPT-2 & WikiText-2 & LoRA output & 67{,}584 & 3 & \(3\mathrm{e}{-4}\) & \(0.799882 \pm 0.000788\) & \(0.809617 \pm 0.000416\) \\
+GPT-2 & WikiText-2 & LoRA QKV & 135{,}168 & 3 & \(3\mathrm{e}{-4}\) & \(0.814074 \pm 0.001176\) & \(0.823783 \pm 0.000679\) \\
+\emph{GPT-2} & \emph{WikiText-2} & \emph{Dense LoReFT} & \emph{67{,}628} & \emph{3} & \(\mathit{3\mathrm{e}{-4}}\) & \(\mathit{0.819904 \pm 0.000225}\) & \(\mathit{0.830409 \pm 0.000242}\) \\
+\hline
+GPT-2 & PTB & ARC \(b=1\) & 25{,}355 & 3 & \(3\mathrm{e}{-4}\) & \(1.607540 \pm 0.009692\) & \(1.602839 \pm 0.009192\) \\
+GPT-2 & PTB & ARC \(b=4\) & 76{,}076 & 3 & \(3\mathrm{e}{-4}\) & \(\mathbf{1.750785 \pm 0.000054}\) & \(\mathbf{1.734511 \pm 0.002178}\) \\
+GPT-2 & PTB & LoRA output & 67{,}584 & 3 & \(3\mathrm{e}{-4}\) & \(1.695426 \pm 0.000926\) & \(1.680403 \pm 0.003017\) \\
+GPT-2 & PTB & LoRA QKV & 135{,}168 & 3 & \(3\mathrm{e}{-4}\) & \(1.738639 \pm 0.002142\) & \(1.717839 \pm 0.001825\) \\
+\emph{GPT-2} & \emph{PTB} & \emph{Dense LoReFT} & \emph{67{,}628} & \emph{3} & \(\mathit{3\mathrm{e}{-4}}\) & \(\mathit{1.790291 \pm 0.000638}\) & \(\mathit{1.770860 \pm 0.000738}\) \\
+\hline
+GPT-2 & OWT10k & ARC \(b=4\) & 76{,}076 & 3 & \(3\mathrm{e}{-4}\) & \(\mathbf{0.135007 \pm 0.000615}\) & \(\mathbf{0.132887 \pm 0.000931}\) \\
+GPT-2 & OWT10k & LoRA output & 67{,}584 & 3 & \(3\mathrm{e}{-4}\) & \(0.123969 \pm 0.000486\) & \(0.123223 \pm 0.000609\) \\
+GPT-2 & OWT10k & LoRA QKV & 135{,}168 & 3 & \(3\mathrm{e}{-4}\) & \(0.129836 \pm 0.000089\) & \(0.128474 \pm 0.000646\) \\
+\emph{GPT-2} & \emph{OWT10k} & \emph{Dense LoReFT} & \emph{67{,}628} & \emph{3} & \(\mathit{3\mathrm{e}{-4}}\) & \(\mathit{0.122178 \pm 0.000137}\) & \(\mathit{0.120444 \pm 0.000275}\) \\
+\hline
+Pythia-160M & WikiText-2 & ARC \(b=4\) & 76{,}076 & 3 & \(3\mathrm{e}{-4}\) & \(0.474625 \pm 0.006738\) & \(0.471868 \pm 0.007707\) \\
+Pythia-160M & WikiText-2 & LoRA output & 67{,}584 & 3 & \(3\mathrm{e}{-4}\) & \(0.408837 \pm 0.010968\) & \(0.408071 \pm 0.011913\) \\
+Pythia-160M & WikiText-2 & LoRA QKV & 135{,}168 & 3 & \(3\mathrm{e}{-4}\) & \(\mathbf{0.477467 \pm 0.012093}\) & \(\mathbf{0.477353 \pm 0.011120}\) \\
+\emph{Pythia-160M} & \emph{WikiText-2} & \emph{Dense LoReFT} & \emph{67{,}628} & \emph{3} & \(\mathit{3\mathrm{e}{-4}}\) & \(\mathit{0.497442 \pm 0.003503}\) & \(\mathit{0.494901 \pm 0.001493}\) \\
+\hline
+Pythia-160M & PTB & ARC \(b=4\) & 76{,}076 & 3 & \(3\mathrm{e}{-4}\) & \(1.201320 \pm 0.007869\) & \(1.180299 \pm 0.008469\) \\
+Pythia-160M & PTB & LoRA output & 67{,}584 & 3 & \(3\mathrm{e}{-4}\) & \(1.038678 \pm 0.019509\) & \(1.029009 \pm 0.021409\) \\
+Pythia-160M & PTB & LoRA QKV & 135{,}168 & 3 & \(3\mathrm{e}{-4}\) & \(\mathbf{1.209961 \pm 0.018310}\) & \(\mathbf{1.188040 \pm 0.017391}\) \\
+\emph{Pythia-160M} & \emph{PTB} & \emph{Dense LoReFT} & \emph{67{,}628} & \emph{3} & \(\mathit{3\mathrm{e}{-4}}\) & \(\mathit{1.250843 \pm 0.009790}\) & \(\mathit{1.229248 \pm 0.009115}\) \\
+\hline
+Pythia-1B & WikiText-2 & ARC \(b=1\) & 98{,}320 & 3 & \(3\mathrm{e}{-5}\) & \(0.699427 \pm 0.015392\) & \(0.668983 \pm 0.014736\) \\
+Pythia-1B & WikiText-2 & ARC \(b=4\) & 294{,}976 & 3 & \(3\mathrm{e}{-5}\) & \(\mathbf{0.720342 \pm 0.002217}\) & \(\mathbf{0.690196 \pm 0.001244}\) \\
+Pythia-1B & WikiText-2 & LoRA output & 262{,}144 & 3 & \(3\mathrm{e}{-5}\) & \(0.708745 \pm 0.001970\) & \(0.674988 \pm 0.001251\) \\
+Pythia-1B & WikiText-2 & LoRA QKV & 524{,}288 & 3 & \(3\mathrm{e}{-5}\) & \(0.710495 \pm 0.002315\) & \(0.674215 \pm 0.003384\) \\
+\emph{Pythia-1B} & \emph{WikiText-2} & \emph{Dense LoReFT} & \emph{262{,}208} & \emph{3} & \(\mathit{3\mathrm{e}{-5}}\) & \(\mathit{0.727826 \pm 0.001004}\) & \(\mathit{0.690707 \pm 0.000564}\) \\
+\hline
+Pythia-1B & PTB & ARC \(b=1\) & 98{,}320 & 3 & \(3\mathrm{e}{-5}\) & \(1.365260 \pm 0.001141\) & \(1.433695 \pm 0.001090\) \\
+Pythia-1B & PTB & ARC \(b=4\) & 294{,}976 & 3 & \(3\mathrm{e}{-5}\) & \(\mathbf{1.375753 \pm 0.014792}\) & \(\mathbf{1.444010 \pm 0.013325}\) \\
+Pythia-1B & PTB & LoRA output & 262{,}144 & 3 & \(3\mathrm{e}{-5}\) & \(1.316645 \pm 0.002375\) & \(1.383931 \pm 0.001917\) \\
+Pythia-1B & PTB & LoRA QKV & 524{,}288 & 3 & \(3\mathrm{e}{-5}\) & \(1.342143 \pm 0.001905\) & \(1.405650 \pm 0.001015\) \\
+\emph{Pythia-1B} & \emph{PTB} & \emph{Dense LoReFT} & \emph{262{,}208} & \emph{3} & \(\mathit{3\mathrm{e}{-5}}\) & \(\mathit{1.398514 \pm 0.000984}\) & \(\mathit{1.467606 \pm 0.001001}\) \\
+\hline

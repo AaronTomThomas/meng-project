@@ -17,4 +17,9 @@ outputs/
 glue_data/
 glue_test_submissions/
 glue_test_submissions_best/
-thesis_results/
+
+# local generated data/results
+outputs/
+glue_data/
+glue_test_submissions/
+glue_test_submissions_best/
