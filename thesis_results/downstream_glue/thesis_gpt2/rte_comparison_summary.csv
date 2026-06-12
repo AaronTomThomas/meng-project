@@ -1,5 +1,0 @@
-task,method,model_name_or_path,report_split,main_metric,n,mean,std,stderr,seeds,trainable_parameters
-rte,akaza_freez,openai-community/gpt2,validation,accuracy,6,0.6528279181708784,0.02954265834350209,0.01206073976449271,"0,1,2,0,1,2",76076
-rte,full_finetune,openai-community/gpt2,validation,accuracy,3,0.6594464500601686,0.011604874561965087,0.006700077452262383,"0,1,2",124439808
-rte,lora,openai-community/gpt2,validation,accuracy,3,0.6377858002406739,0.013667649448376075,0.007891021088209367,"0,1,2",67584
-rte,loreft,openai-community/gpt2,validation,accuracy,3,0.6582430806257521,0.005514531522209211,0.003183816258802165,"0,1,2",67628
