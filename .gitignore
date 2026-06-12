@@ -23,3 +23,12 @@ outputs/
 glue_data/
 glue_test_submissions/
 glue_test_submissions_best/
+
+# local scratch files
+src/check.tex
+check.tex
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
